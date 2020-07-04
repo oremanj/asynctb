@@ -3,6 +3,7 @@ import dis
 import gc
 import sys
 from types import FrameType
+from typing import List, Tuple, Type
 from ._frames import FrameDetails
 
 def inspect_frame(frame: FrameType) -> FrameDetails:
@@ -15,7 +16,7 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
     # fields we can't access from Python, especially f_valuestack and
     # f_stacktop.
     class FrameObjectStart(ctypes.Structure):
-        _fields_ = [
+        _fields_: List[Tuple[str, Type[ctypes._CData]]] = [
             ("ob_refcnt", ctypes.c_ulong),  # reference count
             ("ob_type", ctypes.c_ulong),  # PyTypeObject*
             ("ob_size", ctypes.c_ulong),  # number of pointers after f_localsplus
@@ -148,7 +149,8 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
         details.stack = [
             None
             if address == 0
-            else ctypes.cast(address, ctypes.py_object).value
+            # Needs ignore till https://github.com/python/typeshed/pull/4311 is released
+            else ctypes.cast(address, ctypes.py_object).value  # type: ignore
             for address in stack
         ]
     else:

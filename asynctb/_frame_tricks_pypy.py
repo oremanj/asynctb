@@ -3,7 +3,7 @@ import dis
 import gc
 import sys
 from types import FrameType
-from typing import Dict, List, Optional, Sequence, TYPE_CHECKING
+from typing import Dict, Iterator, List, Optional, Sequence, Type, TYPE_CHECKING
 from ._frames import FrameDetails
 
 
@@ -23,29 +23,12 @@ _pypy_type_index_from_id: Dict[int, int] = {}
 
 if TYPE_CHECKING:
     # typeshed doesn't include the pypy-specific gc methods
-    class PypyGcStuff:
-        class GcRef:
-            pass
-
-        def get_typeids_z(self) -> bytes:
-            ...
-
-        def get_typeids_list(self) -> Sequence[int]:
-            ...
-
-        def get_rpy_type_index(self, obj: object) -> int:
-            ...
-
-        def get_rpy_referents(self, obj: object) -> Sequence[object]:
-            ...
-
-
-    pgc = PypyGcStuff()
+    from . import _pypy_gc_stubs as pgc
 else:
     pgc = gc
 
 
-def _fill_pypy_typemaps():
+def _fill_pypy_typemaps() -> None:
     assert sys.implementation.name == "pypy"
     import zlib
 
@@ -108,18 +91,18 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
 
     lastblock_ref: Optional[pgc.GcRef] = None
     if code_idx >= 2:
-        lastblock_ref = frame_refs[code_idx - 2]
-        if "Block" not in _pypy_typename(lastblock_ref):
+        candidate = frame_refs[code_idx - 2]
+        if "Block" not in _pypy_typename(candidate):
             # There are no blocks active in this frame. lastblock was
             # skipped when getting referents because it's null, so the
             # previous field (generator weakref or f_back) bled through.
             assert (
-                _pypy_typename(lastblock_ref) == "GcStruct weakref"
-                or "Frame" in _pypy_typename(lastblock_ref)
+                _pypy_typename(candidate) == "GcStruct weakref"
+                or "Frame" in _pypy_typename(candidate)
             )
-            lastblock_ref = None
         else:
-            assert isinstance(lastblock_ref, pgc.GcRef)
+            assert isinstance(candidate, pgc.GcRef)
+            lastblock_ref = candidate
 
     # The value stack's referents are everything on the value stack.
     # Unfortunately we can't rely on the indices here because 'del x'
@@ -139,7 +122,9 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
             more = pgc.get_rpy_referents(blocks[-1])
             if not more:
                 break
-            blocks.extend(more)
+            for ref in more:
+                assert isinstance(ref, pgc.GcRef)
+                blocks.append(ref)
         assert all("Block" in _pypy_typename(blk) for blk in blocks)
         # Reverse so the oldest block is at the beginning
         blocks = blocks[::-1]
@@ -153,20 +138,21 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
 
     def unwrap_gcref(ref: pgc.GcRef) -> "ctypes.pointer[ctypes.c_ulong]":
         ref_p = ctypes.pointer(ctypes.c_ulong.from_address(id(ref)))
-        assert "W_GcRef" in _pypy_typename_from_first_word(ref_p[0])
-        return ctypes.pointer(ctypes.c_ulong.from_address(ref_p[1]))
+        assert "W_GcRef" in _pypy_typename_from_first_word(ref_p[0].value)
+        return ctypes.pointer(ctypes.c_ulong.from_address(ref_p[1].value))
 
     # Fill in nulls in the value stack. This requires inspecting the
     # memory that backs the list object. An RPython list is two words
     # (typeid, length) followed by one word per element.
-    def build_full_stack(refs: List[object]) -> Iterator[object]:
+    def build_full_stack(refs: Sequence[object]) -> Iterator[object]:
+        assert isinstance(valuestack_ref, pgc.GcRef)
         stackdata_p = unwrap_gcref(valuestack_ref)
-        assert _pypy_typename_from_first_word(stackdata_p[0]) == (
+        assert _pypy_typename_from_first_word(stackdata_p[0].value) == (
             "GcArray of * GcStruct object"
         )
         ref_iter = iter(refs)
-        for idx in range(stackdata_p[1]):
-            if stackdata_p[2 + idx] == 0:
+        for idx in range(stackdata_p[1].value):
+            if stackdata_p[2 + idx].value == 0:
                 yield None
             else:
                 try:
@@ -177,10 +163,10 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
     details = FrameDetails(stack=list(build_full_stack(valuestack)))
     for block_ref in blocks:
         block_p = unwrap_gcref(block_ref)
-        assert _pypy_typename_from_first_word(block_p[0]) == (
+        assert _pypy_typename_from_first_word(block_p[0].value) == (
             "GcStruct pypy.interpreter.pyopcode.FinallyBlock"
         )
         details.blocks.append(
-            FrameDetails.FinallyBlock(handler=block_p[1], level=block_p[3])
+            FrameDetails.FinallyBlock(handler=block_p[1].value, level=block_p[3].value)
         )
     return details

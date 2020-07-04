@@ -5,7 +5,7 @@ import sys
 import traceback
 import types
 import warnings
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Generator, Iterator, List, Optional, Sequence, Tuple, cast
 
 
 @attr.s(auto_attribs=True, slots=True, frozen=True, kw_only=True)
@@ -50,13 +50,13 @@ def contexts_active_in_frame(frame: types.FrameType) -> List[ContextInfo]:
             from contextlib import contextmanager
 
             @contextmanager
-            def noop():
+            def noop() -> Iterator[None]:
                 yield
 
             noop_cm = noop()
             contexts_live = []
 
-            def fn():
+            def fn() -> Generator[None, None, None]:
                 with noop_cm as xyzzy:
                     contexts_live.extend(_contexts_active_by_trickery(sys._getframe(0)))
                     yield
@@ -144,7 +144,7 @@ def _contexts_active_by_trickery(frame: types.FrameType) -> List[ContextInfo]:
     return [
         attr.evolve(
             with_block_info[blk.handler],
-            manager=frame_details.stack[blk.level - 1].__self__
+            manager=frame_details.stack[blk.level - 1].__self__  # type: ignore
         )
         for blk in frame_details.blocks
     ] + extras
@@ -238,7 +238,7 @@ def _currently_exiting_context(frame: types.FrameType) -> Optional[_ExitingConte
         code[frame.f_lasti] == op["WITH_CLEANUP_START"]
         and code[frame.f_lasti + 2] == op["WITH_CLEANUP_FINISH"]
     ):
-        return ExitingContext(is_async=False, cleanup_offset=frame.f_lasti)
+        return _ExitingContext(is_async=False, cleanup_offset=frame.f_lasti)
     if code[frame.f_lasti : frame.f_lasti + 6 : 2] == bytes(
         [op["LOAD_CONST"], op["YIELD_FROM"], op["WITH_CLEANUP_FINISH"]]
     ):
@@ -249,7 +249,7 @@ def _currently_exiting_context(frame: types.FrameType) -> Optional[_ExitingConte
             code[offs] == op["GET_AWAITABLE"]
             and code[offs - 2] == op["WITH_CLEANUP_START"]
         ):
-            return ExitingContext(is_async=True, cleanup_offset=offs - 2)
+            return _ExitingContext(is_async=True, cleanup_offset=offs - 2)
     return None
 
 
@@ -267,7 +267,7 @@ def _describe_assignment_target(
     if start_idx >= len(insns) or insns[start_idx].opname == "POP_TOP":
         return None
     if insns[start_idx].opname == "STORE_FAST":
-        return insns[start_idx].argval
+        return cast(str, insns[start_idx].argval)
 
     def format_tuple(values: Sequence[str]) -> str:
         if len(values) == 1:
@@ -278,7 +278,7 @@ def _describe_assignment_target(
 
     def next_target() -> str:
         nonlocal idx
-        stack = []
+        stack: List[str] = []
         while True:
             insn = insns[idx]
             idx += 1

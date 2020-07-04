@@ -2,8 +2,10 @@ import attr
 import contextlib
 import gc
 import importlib
+import inspect
 import math
 import sys
+import threading
 import traceback
 import types
 import warnings
@@ -33,6 +35,10 @@ class FrameInfo:
     context_name: Optional[str] = None
 
     def as_stdlib_summary(self, *, save_locals: bool = False) -> traceback.FrameSummary:
+        if self.frame is None:
+            return traceback.FrameSummary(
+                "??", self.lineno or 0, "??", line=self.override_line
+            )
         return traceback.FrameSummary(
             self.frame.f_code.co_filename,
             self.lineno or 0,
@@ -172,15 +178,12 @@ TrioNurseryManager = try_import("trio._core._run", "NurseryManager")
 AGCMBackport = try_import("async_generator._util", "_AsyncGeneratorContextManager")
 AsyncGeneratorBackport = try_import("async_generator._impl", "AsyncGenerator")
 
-try:
+if sys.version_info >= (3, 7):
+    from contextlib import _GeneratorContextManagerBase as GCMBase  # type: ignore
     from contextlib import AsyncExitStack
-except ImportError:
-    AsyncExitStack = try_import("async_exit_stack", "AsyncExitStack")
-
-try:
-    from contextlib import _GeneratorContextManagerBase as GCMBase
-except ImportError:
+else:
     from contextlib import _GeneratorContextManager as GCMBase
+    AsyncExitStack = try_import("async_exit_stack", "AsyncExitStack")
 
 
 def crawl_context(
@@ -211,18 +214,20 @@ def crawl_context(
         yield from crawl_exit_stack(context)
 
 
-def crawl_exit_stack(context: ContextInfo):
+def crawl_exit_stack(context: ContextInfo) -> Iterator[FrameInfo]:
     callbacks: List[Tuple[bool, Callable[..., Any]]]
+
+    raw_callbacks = context.manager._exit_callbacks  # type: ignore
     if sys.version_info >= (3, 7) or isinstance(context.manager, AsyncExitStack):
-        callbacks = list(context.manager._exit_callbacks)
+        callbacks = list(raw_callbacks)
     else:
-        callbacks = [(True, cb) for cb in context.manager._exit_callbacks]
+        callbacks = [(True, cb) for cb in raw_callbacks]
 
     for idx, (is_sync, callback) in enumerate(callbacks):
         tag = ""
         manager = None
         if hasattr(callback, "__self__"):
-            manager = callback.__self__
+            manager = callback.__self__  # type: ignore
             if (
                 # 3.6 used a wrapper function with a __self__ attribute
                 # for actual __exit__ invocations. Later versions use a method.
@@ -248,6 +253,7 @@ def crawl_exit_stack(context: ContextInfo):
         ):
             args_idx = callback.__code__.co_freevars.index("args")
             kwds_idx = callback.__code__.co_freevars.index("kwds")
+            assert callback.__closure__ is not None
             arg = ", ".join(
                 [
                     format_funcname(callback),
@@ -277,7 +283,7 @@ def format_funcname(func: object) -> str:
         if isinstance(func, types.MethodType):
             return f"{func.__self__!r}.{func.__name__}"
         else:
-            return f"{func.__module__}.{func.__qualname__}"
+            return f"{func.__module__}.{func.__qualname__}"  # type: ignore
     except AttributeError:
         return repr(func)
 
