@@ -96,6 +96,11 @@ def inner_context():
 def async_yield(value):
     return (yield value)
 
+if sys.version_info >= (3, 7):
+    null_context_repr = "null_context(...)"
+else:
+    null_context_repr = "asynctb._tests.test_traceback.null_context()"
+
 def test_running():
     def sync_example(root):
         with outer_context():
@@ -108,7 +113,7 @@ def test_running():
         ('sync_example', 'with outer_context():', None, '_GeneratorContextManager'),
         ('outer_context', 'with inner_context() as inner:', 'inner', '_GeneratorContextManager'),
         ('inner_context', 'with stack:', 'stack', 'ExitStack'),
-        ('inner_context', '# stack.enter_context(null_context(...))', 'stack[0]', '_GeneratorContextManager'),
+        ('inner_context', f'# stack.enter_context({null_context_repr})', 'stack[0]', '_GeneratorContextManager'),
         ('null_context', 'yield', None, None),
         ('inner_context', '# stack.push(asynctb._tests.test_traceback.exit_cb)', 'stack[1]', None),
         ('inner_context', "# stack.callback(asynctb._tests.test_traceback.other_cb, 10, 'hi', answer=42)", 'stack[2]', None),
@@ -198,7 +203,7 @@ def test_suspended():
             ('async_example', 'with outer_context():', None, '_GeneratorContextManager'),
             ('outer_context', 'with inner_context() as inner:', 'inner', '_GeneratorContextManager'),
             ('inner_context', 'with stack:', 'stack', 'ExitStack'),
-            ('inner_context', '# stack.enter_context(null_context(...))', 'stack[0]', '_GeneratorContextManager'),
+            ('inner_context', f'# stack.enter_context({null_context_repr})', 'stack[0]', '_GeneratorContextManager'),
             ('null_context', 'yield', None, None),
             ('inner_context', '# stack.push(asynctb._tests.test_traceback.exit_cb)', 'stack[1]', None),
             ('inner_context', "# stack.callback(asynctb._tests.test_traceback.other_cb, 10, 'hi', answer=42)", 'stack[2]', None),
@@ -239,6 +244,35 @@ def test_suspended():
                 ],
             )
 
+def test_greenlet():
+    greenlet = pytest.importorskip("greenlet")
+
+    def outer():
+        with outer_context():
+            return inner()
+
+    def inner():
+        return greenlet.getcurrent().parent.switch(1)
+
+    gr = greenlet.greenlet(outer)
+    assert 1 == gr.switch()
+    assert_tb_matches(
+        Traceback.of(gr),
+        [
+            ('outer', 'with outer_context():', None, '_GeneratorContextManager'),
+            ('outer_context', 'with inner_context() as inner:', 'inner', '_GeneratorContextManager'),
+            ('inner_context', 'with stack:', 'stack', 'ExitStack'),
+            ('inner_context', f'# stack.enter_context({null_context_repr})', 'stack[0]', '_GeneratorContextManager'),
+            ('null_context', 'yield', None, None),
+            ('inner_context', '# stack.push(asynctb._tests.test_traceback.exit_cb)', 'stack[1]', None),
+            ('inner_context', "# stack.callback(asynctb._tests.test_traceback.other_cb, 10, 'hi', answer=42)", 'stack[2]', None),
+            ('inner_context', 'yield', None, None),
+            ('outer_context', 'yield', None, None),
+            ('outer', 'return inner()', None, None),
+            ('inner', 'return greenlet.getcurrent().parent.switch(1)', None, None),
+        ],
+    )
+
 def test_exiting():
     # Test traceback when a synchronous context manager is currently exiting.
     result: Traceback
@@ -268,7 +302,7 @@ def test_exiting():
             ('__exit__', 'next(self.gen)', None, None),
             ('capture_tb_on_exit', 'with inner_context() as inner:', 'inner', '_GeneratorContextManager'),
             ('inner_context', 'with stack:', 'stack', 'ExitStack'),
-            ('inner_context', '# stack.enter_context(null_context(...))', 'stack[0]', '_GeneratorContextManager'),
+            ('inner_context', f'# stack.enter_context({null_context_repr})', 'stack[0]', '_GeneratorContextManager'),
             ('null_context', 'yield', None, None),
             ('inner_context', '# stack.push(asynctb._tests.test_traceback.exit_cb)', 'stack[1]', None),
             ('inner_context', "# stack.callback(asynctb._tests.test_traceback.other_cb, 10, 'hi', answer=42)", 'stack[2]', None),
@@ -331,7 +365,7 @@ def test_running_in_thread():
                 ('thread_example', 'with outer_context():', None, '_GeneratorContextManager'),
                 ('outer_context', 'with inner_context() as inner:', 'inner', '_GeneratorContextManager'),
                 ('inner_context', 'with stack:', 'stack', 'ExitStack'),
-                ('inner_context', '# stack.enter_context(null_context(...))', 'stack[0]', '_GeneratorContextManager'),
+                ('inner_context', f'# stack.enter_context({null_context_repr})', 'stack[0]', '_GeneratorContextManager'),
                 ('null_context', 'yield', None, None),
                 ('inner_context', '# stack.push(asynctb._tests.test_traceback.exit_cb)', 'stack[1]', None),
                 ('inner_context', "# stack.callback(asynctb._tests.test_traceback.other_cb, 10, 'hi', answer=42)", 'stack[2]', None),
@@ -392,7 +426,7 @@ def test_threaded_race():
                 ('async_fn', 'with outer_context():', None, '_GeneratorContextManager'),
                 ('outer_context', 'with inner_context() as inner:', 'inner', '_GeneratorContextManager'),
                 ('inner_context', 'with stack:', 'stack', 'ExitStack'),
-                ('inner_context', '# stack.enter_context(null_context(...))', 'stack[0]', '_GeneratorContextManager'),
+                ('inner_context', f'# stack.enter_context({null_context_repr})', 'stack[0]', '_GeneratorContextManager'),
                 ('null_context', 'yield', None, None),
                 ('inner_context', '# stack.push(asynctb._tests.test_traceback.exit_cb)', 'stack[1]', None),
                 ('inner_context', "# stack.callback(asynctb._tests.test_traceback.other_cb, 10, 'hi', answer=42)", 'stack[2]', None),
@@ -525,7 +559,7 @@ def test_with_trickery_disabled(monkeypatch):
             ('async_example', '', None, '_GeneratorContextManager'),
             ('outer_context', '', None, '_GeneratorContextManager'),
             ('inner_context', '', None, 'ExitStack'),
-            ('inner_context', '# _.enter_context(null_context(...))', '_[0]', '_GeneratorContextManager'),
+            ('inner_context', f'# _.enter_context({null_context_repr})', '_[0]', '_GeneratorContextManager'),
             ('null_context', 'yield', None, None),
             ('inner_context', '# _.push(asynctb._tests.test_traceback.exit_cb)', '_[1]', None),
             ('inner_context', "# _.callback(asynctb._tests.test_traceback.other_cb, 10, 'hi', answer=42)", '_[2]', None),
@@ -535,6 +569,9 @@ def test_with_trickery_disabled(monkeypatch):
             ('async_yield', 'return (yield value)', None, None),
         ],
     )
+
+def no_abort(_):
+    return trio.lowlevel.Abort.FAILED  # pragma: no cover
 
 def test_trio_nursery():
     trio = pytest.importorskip("trio")
@@ -557,9 +594,7 @@ def test_trio_nursery():
 
         async with trio.open_nursery() as outer, uses_nursery():
             trio.lowlevel.current_trio_token().run_sync_soon(report_back)
-            await trio.lowlevel.wait_task_rescheduled(
-                lambda _: trio.lowlevel.Abort.FAILED  # pragma: no cover
-            )
+            await trio.lowlevel.wait_task_rescheduled(no_abort)
 
         return result
 
@@ -570,9 +605,56 @@ def test_trio_nursery():
             ('main', 'async with trio.open_nursery() as outer, uses_nursery():', None, '_AsyncGeneratorContextManager'),
             ('uses_nursery', 'async with trio.open_nursery() as inner:', 'inner', 'Nursery'),
             ('uses_nursery', 'await async_generator.yield_()', None, None),
-            ('main', 'await trio.lowlevel.wait_task_rescheduled(', None, None),
+            ('main', 'await trio.lowlevel.wait_task_rescheduled(no_abort)', None, None),
         ],
     )
+
+def test_greenback():
+    trio = pytest.importorskip("trio")
+    greenback = pytest.importorskip("greenback")
+    result: Traceback
+
+    async def outer():
+        async with trio.open_nursery() as outer_nursery:
+            return middle()
+
+    def middle():
+        with greenback.async_context(trio.open_nursery()) as middle_nursery:
+            return greenback.await_(inner())
+
+    async def inner():
+        with null_context():
+            result: Traceback
+            task = trio.lowlevel.current_task()
+
+            def report_back():
+                nonlocal result
+                result = Traceback.of(task.coro)
+                trio.lowlevel.reschedule(task)
+
+            trio.lowlevel.current_trio_token().run_sync_soon(report_back)
+            await trio.lowlevel.wait_task_rescheduled(no_abort)
+            return result
+
+    async def main():
+        await greenback.ensure_portal()
+        return await outer()
+
+    assert_tb_matches(
+        trio.run(main),
+        [
+            ('greenback_shim', 'return await _greenback_shim(orig_coro)  # type: ignore', None, None),
+            ('main', 'return await outer()', None, None),
+            ('outer', 'async with trio.open_nursery() as outer_nursery:', 'outer_nursery', 'Nursery'),
+            ('outer', 'return middle()', None, None),
+            ('middle', 'with greenback.async_context(trio.open_nursery()) as middle_nursery:', 'middle_nursery', 'Nursery'),
+            ('middle', 'return greenback.await_(inner())', None, None),
+            ('inner', 'with null_context():', None, '_GeneratorContextManager'),
+            ('null_context', 'yield', None, None),
+            ('inner', 'await trio.lowlevel.wait_task_rescheduled(no_abort)', None, None),
+        ],
+    )
+
 
 def test_exitstack_formatting():
     class A:

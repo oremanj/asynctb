@@ -1,6 +1,11 @@
+[paths]
+source =
+  ../asynctb
+  */site-packages/asynctb
+
 [run]
-branch=True
-source=asynctb
+branch = true
+source = asynctb
 
 [report]
 precision = 1

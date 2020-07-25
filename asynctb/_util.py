@@ -1,10 +1,9 @@
 import attr
-from typing import Dict, Iterable, Iterator, MutableSet, TypeVar
+from typing import Dict, Generic, Iterable, Iterator, MutableSet, TypeVar
 
 T = TypeVar("T")
 
 
-@attr.s(eq=True, slots=True, auto_attribs=True)
 class IdentitySet(MutableSet[T]):
     """A set that hashes objects by their identity, not their contents.
 
@@ -12,9 +11,13 @@ class IdentitySet(MutableSet[T]):
     hash which is not cached. You can probably think of other uses too.
     """
 
-    _data: Dict[int, T] = attr.ib(
-        default=(), converter=lambda xs: {id(x): x for x in xs}
-    )
+    __slots__ = ("_data",)
+
+    def __init__(self, xs: Iterable[T] = ()):
+        self._data = {id(x): x for x in xs}
+
+    def __repr__(self) -> str:
+        return f"IdentitySet({list(self)!r})"
 
     def __len__(self) -> int:
         return len(self._data)

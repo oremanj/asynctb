@@ -32,11 +32,10 @@ try:
 except ImportError:
     class GreenletType:
         pass
-else:
-    try:
-        from greenback._impl import _greenback_shim, await_ as greenback_await
-    except ImportError:
-        greenback_await = _greenback_shim = lambda: None
+try:
+    from greenback._impl import _greenback_shim, await_ as greenback_await
+except ImportError:
+    greenback_await = _greenback_shim = lambda: None
 
 
 @attr.s(auto_attribs=True, slots=True, eq=True, frozen=True)
