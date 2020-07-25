@@ -17,24 +17,29 @@ def assert_tb_matches(tb, expected, error=None):
     str(tb)
     tb.as_stdlib_summary()
 
-    if error is None and tb.error is not None:  # pragma: no cover
-        raise tb.error
-    else:
+    try:
+        if error is None and tb.error is not None:  # pragma: no cover
+            raise tb.error
+
         assert type(tb.error) is type(error)
         assert (
-            remove_address_details(str(tb.error)) == remove_address_details(str(error))
+            remove_address_details(str(tb.error))
+            == remove_address_details(str(error))
         )
-    assert len(tb) == len(expected)
-    for entry, (expect_fn, expect_line, expect_ctx_name, expect_ctx_typename) in zip(
-        tb, expected
-    ):
-        assert entry.funcname == expect_fn
-        assert remove_address_details(entry.linetext) == expect_line
-        assert entry.context_name == expect_ctx_name
-        if entry.context_manager is None:
-            assert expect_ctx_typename is None
-        else:
-            assert type(entry.context_manager).__name__ == expect_ctx_typename
+        assert len(tb) == len(expected)
+        for entry, (
+            expect_fn, expect_line, expect_ctx_name, expect_ctx_typename
+        ) in zip(tb, expected):
+            assert entry.funcname == expect_fn
+            assert remove_address_details(entry.linetext) == expect_line
+            assert entry.context_name == expect_ctx_name
+            if entry.context_manager is None:
+                assert expect_ctx_typename is None
+            else:
+                assert type(entry.context_manager).__name__ == expect_ctx_typename
+    except Exception:
+        print_assert_matches("tb")
+        raise
 
 def print_assert_matches(get_tb):  # pragma: no cover
     parent = sys._getframe(1)
@@ -452,15 +457,16 @@ def test_cant_get_referents(monkeypatch):
     async def await_it(thing):
         await thing
 
-    for thing, problem in ((ags, ags), (SomeAwaitable(), wrapper)):
+    for thing, problem, attr in (
+        (ags, ags, "an ag_frame"), (SomeAwaitable(), wrapper, "a cr_frame")
+    ):
         coro = await_it(thing)
         assert 1 == coro.send(None)
         assert_tb_matches(
             Traceback.of(coro),
             [('await_it', 'await thing', None, None)],
             error=RuntimeError(
-                f"Couldn't determine the frame associated with "
-                f"builtins.{type(problem).__name__} {problem!r}"
+                f"{problem!r} doesn't refer to anything with {attr} attribute"
             ),
         )
         with pytest.raises(StopIteration):
