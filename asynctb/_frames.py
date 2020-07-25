@@ -135,19 +135,28 @@ def _contexts_active_by_trickery(frame: types.FrameType) -> List[ContextInfo]:
     """
     with_block_info = analyze_with_blocks(frame.f_code)
     frame_details = inspect_frame(frame)
+    with_blocks = [
+        block for block in frame_details.blocks if block.handler in with_block_info
+    ]
     exiting = _currently_exiting_context(frame)
-    extras = []
+    ret = [
+        attr.evolve(
+            with_block_info[block.handler],
+            manager=frame_details.stack[block.level - 1].__self__  # type: ignore
+        )
+        for block in with_blocks
+    ]
     if exiting is not None:
-        extras.append(
+        ret.append(
             attr.evolve(with_block_info[exiting.cleanup_offset], is_exiting=True)
         )
-    return [
-        attr.evolve(
-            with_block_info[blk.handler],
-            manager=frame_details.stack[blk.level - 1].__self__  # type: ignore
-        )
-        for blk in frame_details.blocks
-    ] + extras
+    locals_by_id = {}
+    for name, value in frame.f_locals.items():
+        locals_by_id[id(value)] = name
+    for idx, info in enumerate(ret):
+        if info.manager is not None and info.varname is None:
+            ret[idx] = attr.evolve(info, varname=locals_by_id.get(id(info.manager)))
+    return ret
 
 
 @attr.s(auto_attribs=True)

@@ -16,7 +16,7 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
     # fields we can't access from Python, especially f_valuestack and
     # f_stacktop.
     class FrameObjectStart(ctypes.Structure):
-        _fields_: List[Tuple[str, Type[ctypes._CData]]] = [
+        _fields_: List[Tuple[str, Type["ctypes._CData"]]] = [
             ("ob_refcnt", ctypes.c_ulong),  # reference count
             ("ob_type", ctypes.c_ulong),  # PyTypeObject*
             ("ob_size", ctypes.c_ulong),  # number of pointers after f_localsplus
@@ -82,16 +82,16 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
     ]
     # Now stack[i] corresponds to f_valuestack[i] in C.
 
-    # Figure out the active context managers. Each context manager
-    # pushes a block to a fixed-size block stack (20 12-byte entries,
-    # this has been unchanged for ages) which is stored by value right
-    # before f_localsplus. There's another frame field for the size of
-    # the block stack.
+    # Figure out the active context managers and finally blocks. Each
+    # context manager pushes a block to a fixed-size block stack (20
+    # 12-byte entries, this has been unchanged for ages) which is
+    # stored by value right before f_localsplus. There's another frame
+    # field for the size of the block stack.
     class PyTryBlock(ctypes.Structure):
         _fields_ = [
             # An opcode; the blocks we want are SETUP_FINALLY
             ("b_type", ctypes.c_int),
-            # An offset in co.co_code; the blocks we want have a
+            # An offset in co.co_code; context managers have a
             # WITH_CLEANUP_START opcode at this offset
             ("b_handler", ctypes.c_int),
             # An index on the value stack; if we're still in the body
@@ -126,13 +126,8 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
             and 0 <= block.b_level <= len(stack)
         )
 
-        # Looks like a valid block -- is it one of our context managers?
-        if (
-            block.b_type == dis.opmap["SETUP_FINALLY"]
-            and co.co_code[block.b_handler] == dis.opmap["WITH_CLEANUP_START"]
-        ):
-            # Yup. Still fully inside the block; use b_level to find the
-            # __exit__ or __aexit__ method
+        # Looks like a valid block -- is it a finally block?
+        if block.b_type == dis.opmap["SETUP_FINALLY"]:
             details.blocks.append(
                 FrameDetails.FinallyBlock(handler=block.b_handler, level=block.b_level)
             )
@@ -144,7 +139,10 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
     # get_referents() doesn't walk the value stack, so we have to make our
     # references the hard way.
     if frame_raw.f_stacktop == 0:
-        stack_validity_limit = max(blk.level for blk in details.blocks)
+        if details.blocks:
+            stack_validity_limit = max(blk.level for blk in details.blocks)
+        else:
+            stack_validity_limit = 0
         del stack[stack_validity_limit :]
         details.stack = [
             None

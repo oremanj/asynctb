@@ -1,1 +1,2 @@
-from ._traceback import FrameInfo, get_traceback
+from ._version import __version__
+from ._traceback import FrameInfo, Traceback
