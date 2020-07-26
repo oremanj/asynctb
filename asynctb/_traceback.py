@@ -28,14 +28,19 @@ from ._frames import ContextInfo, contexts_active_in_frame
 from ._util import IdentitySet
 
 try:
-    from greenlet import greenlet as GreenletType
+    from greenlet import greenlet as GreenletType, getcurrent as greenlet_getcurrent
 except ImportError:
     class GreenletType:
-        pass
+        parent: Optional["GreenletType"] = None
+        gr_frame: Optional[types.FrameType]
+
+    def greenlet_getcurrent() -> GreenletType:
+        return GreenletType()
+
 try:
     from greenback._impl import _greenback_shim, await_ as greenback_await
 except ImportError:
-    greenback_await = _greenback_shim = lambda: None
+    greenback_await = _greenback_shim = lambda: None  # pragma: no cover
 
 
 @attr.s(auto_attribs=True, slots=True, eq=True, frozen=True)
@@ -169,24 +174,33 @@ class Traceback:
     def of(cls, owner: object, *, with_context_info: bool = True) -> "Traceback":
         """Return a traceback reflecting the current stack of *owner*, which
         must be a coroutine object, greenlet object, or (sync or
-        async) generator iterator. A generator or coroutine may be
-        either running or suspended. If it's running in a different
-        thread, we'll still attempt to extract a traceback, but might
-        not be able to. A greenlet must be suspended.
+        async) generator iterator. It may be either running or
+        suspended. If it's running in a different thread, we'll still
+        attempt to extract a traceback, but might not be able to. In
+        particular, greenlets running in other threads can never be
+        tracebacked, and other owners might fail to extract a traceback
+        depending on when thread switches occur.
 
         Produce an :ref:`enhanced traceback <enhanced-tb>` if *with_context_info*
         is True (the default), or a basic traceback if *with_context_info* is False.
 
         """
         if isinstance(owner, GreenletType):
-            if owner.gr_frame is None:
-                return Traceback(
-                    frames=(),
-                    error=RuntimeError(
-                        "Traceback.of(greenlet) requires that the greenlet be suspended"
-                    ),
-                )
-            producer = iterate_running(None, owner.gr_frame, owner, with_context_info)
+            frame = owner.gr_frame
+            if frame is None:
+                if not owner:  # dead or not started
+                    return Traceback(frames=())
+                # otherwise a None frame means it's running
+                if owner is not greenlet_getcurrent():
+                    return Traceback(
+                        frames=(),
+                        error=RuntimeError(
+                            "Traceback.of(greenlet) can't handle a greenlet running "
+                            "in another thread"
+                        ),
+                    )
+                frame = sys._getframe(1)
+            producer = iterate_running(None, frame, owner, with_context_info)
         else:
             producer = iterate_suspended(unwrap_owner(owner), with_context_info)
         return cls._make(producer)
@@ -401,16 +415,12 @@ def iterate_suspended(
                 # Continue the traceback by walking the coroutine's frames.
                 owner = orig_coro
                 continue
-
-            # This might happen if the coroutine gets resumed in a different
-            # thread while we're looking at it. It's more challenging to recover
-            # from that race than it is without greenback, so we don't bother
-            # trying.
-            yield from one_frame_traceback(owner, this_frame, None, with_context_info)
-            raise RuntimeError(
-                "Can't identify what's going on with the greenback shim in the above "
-                "frame"
-            )
+            else:  # pragma: no cover
+                yield from one_frame_traceback(owner, this_frame, None, with_context_info)
+                raise RuntimeError(
+                    "Can't identify what's going on with the greenback shim in the above "
+                    "frame"
+                )
 
         # Otherwise, the generator/coroutine is suspended. Yield info
         # about this_frame (and its context managers), then continue
@@ -461,6 +471,57 @@ def iterate_running(
     # outer_frame in the traceback, we have to find a currently
     # executing frame that has outer_frame on its stack.
 
+    # When getting a traceback that ends here, actually start 2 frames up
+    # (skip iterate_running() and frames_from_producer()) to expose
+    # fewer implementation details.
+    ELIDE_FRAMES = 2
+
+    # This function tries a bunch of different ways to fill out this 'frames'
+    # list, as a list of the frames we want to traceback from outermost
+    # to innermost.
+    frames: List[types.FrameType] = []
+
+    if sys.implementation.name == "cpython" and greenlet_getcurrent().parent:
+        # On CPython, each greenlet is its own universe traceback-wise:
+        # if you're inside a non-main greenlet and you follow f_back links
+        # outward from your current frame, you'll only find the outermost
+        # frame in this greenlet, not in this thread. We augment that by
+        # following the greenlet parent link (the same path an exception
+        # would take) when we reach an f_back of None.
+        #
+        # This only works on the current thread, since there's no way
+        # to call greenlet.getcurrent() for another thread. (There's a key
+        # in the thread state dictionary, which we can't safely access because
+        # any other thread state can disappear out from under us whenever we
+        # yield the GIL, which we can't prevent from happening. Resolving
+        # this would require an extension module.)
+        #
+        # PyPy uses a more sensible scheme where the f_back links in the
+        # current callstack always work, so it doesn't need this trick.
+        this_thread_frames: List[types.FrameType] = []
+        greenlet = greenlet_getcurrent()
+        current: Optional[types.FrameType] = sys._getframe(ELIDE_FRAMES)
+        while greenlet is not None:
+            while current is not None:
+                this_thread_frames.append(current)
+                current = current.f_back
+            greenlet = greenlet.parent
+            if greenlet is not None:
+                current = greenlet.gr_frame
+        try:
+            from_idx = (
+                0 if inner_frame is None else this_thread_frames.index(inner_frame) - 1
+            )
+            to_idx = (
+                len(this_thread_frames)
+                if outer_frame is None
+                else this_thread_frames.index(outer_frame)
+            )
+        except ValueError:
+            pass
+        else:
+            frames = this_thread_frames[to_idx : from_idx : -1]
+
     def try_from(potential_inner_frame: types.FrameType) -> List[types.FrameType]:
         """If potential_inner_frame has outer_frame somewhere up its callstack,
         return the list of frames between them, starting with
@@ -479,12 +540,8 @@ def iterate_running(
             return frames[::-1]
         return []
 
-    if inner_frame is None:
-        # Argument of 2 skips this frame and frames_from_producer(), so as not
-        # to expose implementation details.
-        frames = try_from(sys._getframe(2))
-    else:
-        frames = try_from(inner_frame)
+    if not frames:
+        frames = try_from(inner_frame or sys._getframe(ELIDE_FRAMES))
 
     if not frames and inner_frame is None:
         # outer_frame isn't on *our* stack, but it might be on some

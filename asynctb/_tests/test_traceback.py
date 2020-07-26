@@ -16,6 +16,9 @@ def assert_tb_matches(tb, expected, error=None):
     # smoke test:
     str(tb)
     tb.as_stdlib_summary()
+    tb.as_stdlib_summary(capture_locals=True)
+    for frame in tb.frames:
+        str(frame)
 
     try:
         if error is None and tb.error is not None:  # pragma: no cover
@@ -244,6 +247,9 @@ def test_suspended():
                 ],
             )
 
+    # Exhausted coro/generator has no traceback
+    assert_tb_matches(Traceback.of(coro), [])
+
 def test_greenlet():
     greenlet = pytest.importorskip("greenlet")
 
@@ -255,6 +261,8 @@ def test_greenlet():
         return greenlet.getcurrent().parent.switch(1)
 
     gr = greenlet.greenlet(outer)
+    assert_tb_matches(Traceback.of(gr), [])  # not started -> empty tb
+
     assert 1 == gr.switch()
     assert_tb_matches(
         Traceback.of(gr),
@@ -272,6 +280,39 @@ def test_greenlet():
             ('inner', 'return greenlet.getcurrent().parent.switch(1)', None, None),
         ],
     )
+
+    assert 2 == gr.switch(2)
+    assert_tb_matches(Traceback.of(gr), [])  # dead -> empty tb
+
+@pytest.mark.skipif(
+    sys.implementation.name == "pypy",
+    reason="https://foss.heptapod.net/pypy/pypy/-/blob/branch/py3.6/lib_pypy/greenlet.py#L124",
+)
+def test_greenlet_in_other_thread():
+    greenlet = pytest.importorskip("greenlet")
+    ready_evt = threading.Event()
+    done_evt = threading.Event()
+    gr = None
+
+    def thread_fn():
+        def target():
+            ready_evt.set()
+            done_evt.wait()
+
+        nonlocal gr
+        gr = greenlet.greenlet(target)
+        gr.switch()
+
+    threading.Thread(target=thread_fn).start()
+    ready_evt.wait()
+    assert_tb_matches(
+        Traceback.of(gr),
+        [],
+        error=RuntimeError(
+            "Traceback.of(greenlet) can't handle a greenlet running in another thread"
+        ),
+    )
+    done_evt.set()
 
 def test_exiting():
     # Test traceback when a synchronous context manager is currently exiting.
@@ -338,6 +379,32 @@ def test_exiting():
             ('async_yield', 'return (yield value)', None, None),
         ],
     )
+
+def test_errors():
+    with pytest.raises(TypeError, match="must be a frame"):
+        Traceback.since(42)
+    with pytest.raises(TypeError, match="must be a frame or integer"):
+        Traceback.until(sys._getframe(0), limit=2.4)
+    with pytest.raises(RuntimeError, match="is not an indirect caller of"):
+        Traceback.until(sys._getframe(1), limit=sys._getframe(0))
+
+def test_traceback_until():
+    outer = sys._getframe(0)
+
+    def example():
+        inner = sys._getframe(0)
+        tb1, tb2, tb3 = [Traceback.until(inner, limit=lim) for lim in (1, outer, None)]
+        assert tb1 == tb2
+        assert tb3.frames[-len(tb1):] == tb1.frames
+        assert_tb_matches(
+            tb1,
+            [
+                ('test_traceback_until', 'example()', None, None),
+                ('example', 'tb1, tb2, tb3 = [Traceback.until(inner, limit=lim) for lim in (1, outer, None)]', None, None),
+            ],
+        )
+
+    example()
 
 def test_running_in_thread():
     def thread_example(arrived_evt, depart_evt):
@@ -612,43 +679,76 @@ def test_trio_nursery():
 def test_greenback():
     trio = pytest.importorskip("trio")
     greenback = pytest.importorskip("greenback")
-    result: Traceback
+    results: List[Traceback] = []
 
     async def outer():
         async with trio.open_nursery() as outer_nursery:
-            return middle()
+            middle()
+            await inner()
 
     def middle():
         with greenback.async_context(trio.open_nursery()) as middle_nursery:
-            return greenback.await_(inner())
+            greenback.await_(inner())
+
+            # This winds up traversing an await_ before it has a coroutine to use.
+            class ExtractWhenAwaited:
+                def __await__(self):
+                    task = trio.lowlevel.current_task()
+                    assert_tb_matches(
+                        Traceback.of(task.coro),
+                        [
+                            ('greenback_shim', 'return await _greenback_shim(orig_coro)  # type: ignore', None, None),
+                            ('main', 'return await outer()', None, None),
+                            ('outer', 'async with trio.open_nursery() as outer_nursery:', 'outer_nursery', 'Nursery'),
+                            ('outer', 'middle()', None, None),
+                            ('middle', 'with greenback.async_context(trio.open_nursery()) as middle_nursery:', 'middle_nursery', 'Nursery'),
+                            ('middle', 'greenback.await_(ExtractWhenAwaited())', None, None),
+                            ('adapt_awaitable', 'return await aw', None, None),
+                            ('__await__', 'Traceback.of(task.coro),', None, None),
+                        ],
+                    )
+                    yield from ()
+
+            greenback.await_(ExtractWhenAwaited())
 
     async def inner():
         with null_context():
-            result: Traceback
             task = trio.lowlevel.current_task()
 
             def report_back():
-                nonlocal result
-                result = Traceback.of(task.coro)
+                results.append(Traceback.of(task.coro))
                 trio.lowlevel.reschedule(task)
 
             trio.lowlevel.current_trio_token().run_sync_soon(report_back)
             await trio.lowlevel.wait_task_rescheduled(no_abort)
-            return result
 
     async def main():
         await greenback.ensure_portal()
         return await outer()
 
+    trio.run(main)
+    assert len(results) == 2
     assert_tb_matches(
-        trio.run(main),
+        results[0],
         [
             ('greenback_shim', 'return await _greenback_shim(orig_coro)  # type: ignore', None, None),
             ('main', 'return await outer()', None, None),
             ('outer', 'async with trio.open_nursery() as outer_nursery:', 'outer_nursery', 'Nursery'),
-            ('outer', 'return middle()', None, None),
+            ('outer', 'middle()', None, None),
             ('middle', 'with greenback.async_context(trio.open_nursery()) as middle_nursery:', 'middle_nursery', 'Nursery'),
-            ('middle', 'return greenback.await_(inner())', None, None),
+            ('middle', 'greenback.await_(inner())', None, None),
+            ('inner', 'with null_context():', None, '_GeneratorContextManager'),
+            ('null_context', 'yield', None, None),
+            ('inner', 'await trio.lowlevel.wait_task_rescheduled(no_abort)', None, None),
+        ],
+    )
+    assert_tb_matches(
+        results[1],
+        [
+            ('greenback_shim', 'return await _greenback_shim(orig_coro)  # type: ignore', None, None),
+            ('main', 'return await outer()', None, None),
+            ('outer', 'async with trio.open_nursery() as outer_nursery:', 'outer_nursery', 'Nursery'),
+            ('outer', 'await inner()', None, None),
             ('inner', 'with null_context():', None, '_GeneratorContextManager'),
             ('null_context', 'yield', None, None),
             ('inner', 'await trio.lowlevel.wait_task_rescheduled(no_abort)', None, None),
