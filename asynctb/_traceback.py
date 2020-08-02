@@ -12,7 +12,9 @@ import types
 import warnings
 from typing import (
     Any,
+    AsyncGenerator,
     Callable,
+    Coroutine,
     Dict,
     Generator,
     Iterator,
@@ -25,7 +27,9 @@ from typing import (
 )
 
 from ._frames import ContextInfo, contexts_active_in_frame
-from ._util import IdentitySet
+from ._registry import (
+    unwrap_awaitable, unwrap_context_manager, CodeHandling, HANDLING_FOR_CODE
+)
 
 try:
     from greenlet import greenlet as GreenletType, getcurrent as greenlet_getcurrent
@@ -37,17 +41,16 @@ except ImportError:
     def greenlet_getcurrent() -> GreenletType:
         return GreenletType()
 
-try:
-    from greenback._impl import _greenback_shim, await_ as greenback_await
-except ImportError:
-    greenback_await = _greenback_shim = lambda: None  # pragma: no cover
+
+GeneratorLike = Union[
+    Generator[Any, Any, Any], AsyncGenerator[Any, Any], Coroutine[Any, Any, Any]
+]
 
 
 @attr.s(auto_attribs=True, slots=True, eq=True, frozen=True)
 class FrameInfo:
     """Information about one frame in a `Traceback`."""
 
-    owner: object
     frame: types.FrameType
     lineno: int = attr.Factory(lambda self: self.frame.f_lineno, takes_self=True)
     _override_line: Optional[str] = None
@@ -143,14 +146,8 @@ class FrameInfo:
 # with running frames, in which the inner frame has an f_back that
 # refers to the outer). We sometimes need to switch between these.
 # This is implemented by defining two generator functions, iterate_suspended
-# and iterate_running, each of which produces a generator of type
-# FrameProducer. Mode switching is implemented trampoline-style,
-# by allowing each FrameProducer to return another FrameProducer
-# that should take over for it.
-#
-# The return type should be Optional[FrameProducer] but mypy doesn't
-# support recursive types yet.
-FrameProducer = Generator[FrameInfo, None, Any]
+# and iterate_running, each of which yields FrameInfos. Mode switching
+# is implemented by having one yield from the other.
 
 
 @attr.s(auto_attribs=True, slots=True, eq=True, frozen=True)
@@ -171,27 +168,32 @@ class Traceback:
     error: Optional[Exception] = None
 
     @classmethod
-    def of(cls, owner: object, *, with_context_info: bool = True) -> "Traceback":
-        """Return a traceback reflecting the current stack of *owner*, which
-        must be a coroutine object, greenlet object, or (sync or
+    def of(
+        cls,
+        stackref: Union[GeneratorLike, GreenletType],
+        *,
+        with_context_info: bool = True,
+    ) -> "Traceback":
+        """Return a traceback reflecting the current stack of *stackref*,
+        which must be a coroutine object, greenlet object, or (sync or
         async) generator iterator. It may be either running or
         suspended. If it's running in a different thread, we'll still
         attempt to extract a traceback, but might not be able to. In
         particular, greenlets running in other threads can never be
-        tracebacked, and other owners might fail to extract a traceback
-        depending on when thread switches occur.
+        tracebacked, and generator-like objects might fail to extract
+        a traceback depending on when thread switches occur.
 
         Produce an :ref:`enhanced traceback <enhanced-tb>` if *with_context_info*
         is True (the default), or a basic traceback if *with_context_info* is False.
-
         """
-        if isinstance(owner, GreenletType):
-            frame = owner.gr_frame
-            if frame is None:
-                if not owner:  # dead or not started
+        if isinstance(stackref, GreenletType):
+            inner_frame = stackref.gr_frame
+            outer_frame = None
+            if inner_frame is None:
+                if not stackref:  # dead or not started
                     return Traceback(frames=())
                 # otherwise a None frame means it's running
-                if owner is not greenlet_getcurrent():
+                if stackref is not greenlet_getcurrent():
                     return Traceback(
                         frames=(),
                         error=RuntimeError(
@@ -199,10 +201,15 @@ class Traceback:
                             "in another thread"
                         ),
                     )
-                frame = sys._getframe(1)
-            producer = iterate_running(None, frame, owner, with_context_info)
+                # since it's running in this thread, its stack is our own
+                inner_frame = sys._getframe(1)
+                if stackref.parent is not None:
+                    outer_frame = stackref.parent.gr_frame
+            producer = iterate_running(
+                outer_frame, inner_frame, with_context_info, stackref
+            )
         else:
-            producer = iterate_suspended(unwrap_owner(owner), with_context_info)
+            producer = iterate_suspended(stackref, with_context_info)
         return cls._make(producer)
 
     @classmethod
@@ -293,11 +300,11 @@ class Traceback:
         return cls._make(iterate_running(outer_frame, inner_frame, with_context_info))
 
     @classmethod
-    def _make(cls, producer: FrameProducer) -> "Traceback":
+    def _make(cls, producer: Iterator[FrameInfo]) -> "Traceback":
         frames: List[FrameInfo] = []
         error: Optional[Exception] = None
         try:
-            frames.extend(frames_from_producer(producer))
+            frames.extend(producer)
         except Exception as exc:
             error = exc
         return cls(tuple(frames), error)
@@ -343,28 +350,21 @@ class Traceback:
 # -------- Everything below this point is implementation details --------
 
 
-# Singleton object returned as the next_owner from frame_and_next() to indicate
+# Singleton object returned by next_from_genlike() to indicate
 # that a generator or coroutine is currently running and that we therefore
 # need to switch to iterate_running().
 RUNNING = object()
 
 
-def frames_from_producer(producer: Optional[FrameProducer]) -> Iterator[FrameInfo]:
-    # This is the "trampoline" that converts a FrameProducer into a
-    # simple iterator over FrameInfos. See the comment on the FrameProducer
-    # type definition for more details.
-    while producer is not None:
-        try:
-            yield next(producer)
-        except StopIteration as exc:
-            producer = exc.value
+_default_handling = CodeHandling()
 
 
 def iterate_suspended(
-    owner: object, with_context_info: bool, switch_count: int = 0
-) -> FrameProducer:
+    genlike: GeneratorLike, with_context_info: bool, switch_count: int = 0
+) -> Iterator[FrameInfo]:
     """Yield information about a series of frames representing the current
-    stack of the suspended generator or coroutine object *owner*.
+    stack of the suspended generator iterator, async generator iterator,
+    or coroutine object *genlike*.
 
     If *with_context_info* is True, yield additional frames
     representing context managers, to produce an enhanced traceback.
@@ -374,75 +374,56 @@ def iterate_suspended(
     loops.
     """
 
-    while owner is not None:
-        this_frame = frame_from_owner(owner)
+    genlike = unwrap_awaitable(genlike)
+
+    while genlike is not None:
+        this_frame = frame_from_genlike(genlike)
         if this_frame is None:
             # Exhausted generator/coroutine has no traceback
-            return
+            break
 
-        next_owner = next_from_owner(owner)
-        if next_owner is RUNNING:
+        next_genlike = next_from_genlike(genlike)
+        if next_genlike is RUNNING:
             # If it's running, cr_await/ag_await/gi_yieldfrom aren't available,
             # so we need an alternate approach.
-            return iterate_running(
+            yield from iterate_running(
                 outer_frame=this_frame,
                 inner_frame=None,
                 with_context_info=with_context_info,
-                first_owner=owner,
+                parent=genlike,
                 switch_count=switch_count + 1,
             )
-
-        if (
-            isinstance(owner, types.GeneratorType)
-            and owner.gi_code is _greenback_shim.__code__
-        ):
-            # Greenback shim. Is the child coroutine suspended in an await_()?
-            child_greenlet = this_frame.f_locals.get("child_greenlet")
-            orig_coro = this_frame.f_locals.get("orig_coro")
-            gr_frame = getattr(child_greenlet, "gr_frame", None)
-            if gr_frame is not None:
-                # Yep; switch to walking the greenlet stack, since orig_coro
-                # will look "running" but it's not on any thread's stack.
-                return iterate_running(
-                    outer_frame=None,
-                    inner_frame=gr_frame,
-                    with_context_info=with_context_info,
-                    first_owner=orig_coro,
-                    switch_count=switch_count + 1,
-                )
-            elif orig_coro is not None:
-                # No greenlet, so child is suspended at a regular await.
-                # Continue the traceback by walking the coroutine's frames.
-                owner = orig_coro
-                continue
-            else:  # pragma: no cover
-                yield from one_frame_traceback(owner, this_frame, None, with_context_info)
-                raise RuntimeError(
-                    "Can't identify what's going on with the greenback shim in the above "
-                    "frame"
-                )
+            break
 
         # Otherwise, the generator/coroutine is suspended. Yield info
         # about this_frame (and its context managers), then continue
-        # down the stack to next_owner (the thing this owner is
-        # awaiting).
+        # down the stack to next_genlike (the thing this genlike is
+        # awaiting/yielding-from).
+
         try:
-            next_frame = frame_from_owner(next_owner)
+            next_frame = frame_from_genlike(next_genlike)
         except Exception:
             next_frame = None
-        yield from one_frame_traceback(
-            owner, this_frame, next_frame, with_context_info,
+        keep_going = yield from handle_frame(
+            this_frame=this_frame,
+            next_frame=next_frame,
+            with_context_info=with_context_info,
+            is_terminal=next_genlike is None,
+            switch_count=switch_count,
         )
-        owner = unwrap_owner(next_owner)
+        if not keep_going:
+            break
+
+        genlike = unwrap_awaitable(next_genlike)
 
 
 def iterate_running(
     outer_frame: Optional[types.FrameType],
     inner_frame: Optional[types.FrameType],
     with_context_info: bool,
-    first_owner: object = None,
+    parent: Union[GeneratorLike, GreenletType, None] = None,
     switch_count: int = 0,
-) -> FrameProducer:
+) -> Iterator[FrameInfo]:
     """Yield information about a series of frames linked via f_back
     members from inner_frame out to outer_frame. (They will be yielded
     in the opposite order, outer_frame first.)
@@ -452,9 +433,11 @@ def iterate_running(
     on any thread that has outer_frame on its stack. If both are None, produce
     frames for the current thread's entire stack.
 
-    The first yielded FrameInfo will have its `owner` attribute set to
-    *first_owner*; this is used when producing the stack of a running
-    coroutine or generator. All subsequent FrameInfos will have owner=None.
+    If these frames represent the stack of a running generator or
+    coroutine or greenlet, pass *parent* as that generator or
+    coroutine or greenlet. This is used to switch back to
+    iterate_suspended() if a generator or coroutine stops running (in
+    another thread) while we're looking, and to
 
     If *with_context_info* is True, yield additional frames
     representing context managers, to produce an enhanced traceback.
@@ -462,6 +445,7 @@ def iterate_running(
     *switch_count* tracks the number of times we have switched modes
     from inward to outward or vice versa, as a guard against infinite
     loops.
+
     """
 
     # Running frames are linked "outward" (from the current frame
@@ -471,15 +455,20 @@ def iterate_running(
     # outer_frame in the traceback, we have to find a currently
     # executing frame that has outer_frame on its stack.
 
-    # When getting a traceback that ends here, actually start 2 frames up
-    # (skip iterate_running() and frames_from_producer()) to expose
-    # fewer implementation details.
-    ELIDE_FRAMES = 2
-
     # This function tries a bunch of different ways to fill out this 'frames'
     # list, as a list of the frames we want to traceback from outermost
     # to innermost.
     frames: List[types.FrameType] = []
+
+    def get_true_caller() -> Optional[types.FrameType]:
+        # Return the frame that called into the traceback-producing machinery.
+        # That will be at least 3 frames up (iterate_running, Traceback._make,
+        # Traceback.of/since/until) and might be more if we've done some mode
+        # switching.
+        caller = sys._getframe(3)
+        while caller is not None and caller.f_globals is globals():
+            caller = caller.f_back
+        return caller
 
     if sys.implementation.name == "cpython" and greenlet_getcurrent().parent:
         # On CPython, each greenlet is its own universe traceback-wise:
@@ -500,7 +489,7 @@ def iterate_running(
         # current callstack always work, so it doesn't need this trick.
         this_thread_frames: List[types.FrameType] = []
         greenlet = greenlet_getcurrent()
-        current: Optional[types.FrameType] = sys._getframe(ELIDE_FRAMES)
+        current: Optional[types.FrameType] = get_true_caller()
         while greenlet is not None:
             while current is not None:
                 this_thread_frames.append(current)
@@ -509,9 +498,11 @@ def iterate_running(
             if greenlet is not None:
                 current = greenlet.gr_frame
         try:
-            from_idx = (
-                0 if inner_frame is None else this_thread_frames.index(inner_frame) - 1
-            )
+            from_idx: Optional[int]
+            if inner_frame is None or this_thread_frames[0] is inner_frame:
+                from_idx = None
+            else:
+                from_idx = this_thread_frames.index(inner_frame) - 1
             to_idx = (
                 len(this_thread_frames)
                 if outer_frame is None
@@ -541,7 +532,7 @@ def iterate_running(
         return []
 
     if not frames:
-        frames = try_from(inner_frame or sys._getframe(ELIDE_FRAMES))
+        frames = try_from(inner_frame or get_true_caller())
 
     if not frames and inner_frame is None:
         # outer_frame isn't on *our* stack, but it might be on some
@@ -559,78 +550,120 @@ def iterate_running(
         else:
             # We couldn't find any thread that had outer_frame
             # on its stack.
-            if first_owner is not None and switch_count < 50:
-                if next_from_owner(first_owner) is not RUNNING:
+            if (
+                parent is not None
+                and not isinstance(parent, GreenletType)
+                and switch_count < 50
+            ):
+                if next_from_genlike(parent) is not RUNNING:
                     # It was running when we started looking, but now
                     # is suspended again. Switch to the logic for suspended
                     # frames. (There's no specific limit to how many times this
                     # can occur; our only argument against an infinite
                     # recursion here is probabilistic, but it's a pretty good
                     # one.)
-                    return iterate_suspended(
-                        owner=first_owner,
+                    yield from iterate_suspended(
+                        genlike=parent,
                         with_context_info=with_context_info,
                         switch_count=switch_count + 1,
                     )
                 else:
-                    # Possibly the owner became suspended before we
-                    # extracted _current_frames() and then started running
-                    # again before we called frame_and_next(). Or possibly
-                    # we've become confused and found a frame that isn't
-                    # running at all, e.g., because it's part of a
-                    # suspended greenlet. Assume the former until we hit
-                    # our mode-switching limit, at which point give up
-                    # so as not to infinite-loop in the latter case.
-                    return iterate_running(
+                    # Possibly it became suspended before we extracted
+                    # _current_frames() and then started running again
+                    # before we called frame_and_next(). Or possibly
+                    # we've become confused and found a frame that
+                    # isn't running at all, e.g., because it's part of
+                    # a suspended greenlet. Assume the former until we
+                    # hit our mode-switching limit, at which point
+                    # give up so as not to infinite-loop in the latter case.
+                    yield from iterate_running(
                         outer_frame=outer_frame,
                         inner_frame=None,
                         with_context_info=with_context_info,
-                        first_owner=first_owner,
+                        parent=parent,
                         switch_count=switch_count + 1,
                     )
+                return
 
     if not frames:
         # If outer_frame is None, try_from() always returns a non-empty
         # list, so we can only get here if outer_frame is not None.
         assert outer_frame is not None
-        yield from one_frame_traceback(
-            first_owner, outer_frame, None, with_context_info
-        )
+        yield from one_frame_traceback(outer_frame, None, False)
         raise RuntimeError(
             "Couldn't find where the above frame is running, so "
             "can't continue traceback"
         )
 
     for this_frame, next_frame in zip(frames, frames[1:] + [None]):
-        if this_frame.f_code is greenback_await.__code__:
-            # Greenback-mediated await of async function from sync land.
-            # If we have a coroutine to descend into, do so;
-            # otherwise the traceback will unhelpfully stop here.
-            # This works whether the coro is running or not.
-            # (The only way to get coro=None is if we're taking
-            # the traceback in the early part of await_() before
-            # coro is assigned.)
-            coro = this_frame.f_locals.get("coro")
-            if coro is not None:
-                return iterate_suspended(
-                    owner=coro,
+        keep_going = yield from handle_frame(
+            this_frame=this_frame,
+            next_frame=next_frame,
+            with_context_info=with_context_info,
+            is_terminal=next_frame is None,
+            switch_count=switch_count,
+        )
+        if not keep_going:
+            break
+
+
+def handle_frame(
+    this_frame: types.FrameType,
+    next_frame: Optional[types.FrameType],
+    with_context_info: bool,
+    is_terminal: bool,
+    switch_count: int,
+) -> Generator[FrameInfo, None, bool]:
+    """ XXX document """
+
+    handling = HANDLING_FOR_CODE.get(this_frame.f_code, _default_handling)
+
+    if not handling.skip_frame:
+        yield from one_frame_traceback(this_frame, next_frame, with_context_info)
+
+    if handling.skip_callees:
+        return False
+
+    if handling.get_target is not None:
+        try:
+            target = handling.get_target(this_frame, is_terminal)
+            if isinstance(target, GreenletType):
+                # This frame is the runner for a greenlet.
+                # Grab gr_frame atomically in case it starts running in
+                # another thread.
+                gr_frame = target.gr_frame
+                if gr_frame is not None:
+                    yield from iterate_running(
+                        outer_frame=None,
+                        inner_frame=gr_frame,
+                        with_context_info=with_context_info,
+                        parent=target,
+                        switch_count=switch_count + 1,
+                    )
+                elif target:
+                    # not dead, so lack of gr_frame means running, but it's
+                    # not running in this thread because it was reached from
+                    # a suspended coroutine/etc -- so it must be running in
+                    # another thread
+                    raise RuntimeError(
+                        "Can't trace into a greenlet running in another thread"
+                    )
+            elif target is not None:
+                # This frame is the runner for a genlike
+                yield from iterate_suspended(
+                    genlike=target,
                     with_context_info=with_context_info,
                     switch_count=switch_count + 1,
                 )
+        except Exception:
+            if handling.skip_frame:
+                yield from one_frame_traceback(this_frame, None, False)
+            raise
 
-        yield from one_frame_traceback(
-            first_owner, this_frame, next_frame, with_context_info
-        )
-        first_owner = None
-
-
-# Frames executing any of these code objects will not be included
-# in tracebacks.
-SKIP_CODE_OBJECTS = IdentitySet[types.CodeType]()
+    return True
 
 
 def one_frame_traceback(
-    owner: object,
     this_frame: types.FrameType,
     next_frame: Optional[types.FrameType],
     with_context_info: bool,
@@ -648,8 +681,6 @@ def one_frame_traceback(
     *this_frame*, or None; it is used to determine the context manager
     object currently being exited, if any.
     """
-    if this_frame.f_code in SKIP_CODE_OBJECTS:
-        return
     if with_context_info:
         for context in contexts_active_in_frame(this_frame):
             if context.is_exiting and next_frame is not None:
@@ -659,76 +690,8 @@ def one_frame_traceback(
                 args = inspect.getargvalues(next_frame)
                 if args.args:
                     context = attr.evolve(context, manager=args.locals[args.args[0]])
-            yield from crawl_context(owner, this_frame, context)
-    yield FrameInfo(owner, this_frame)
-
-
-class NotPresent:
-    """Dummy type used to stub out a type with special support, if the actual
-    type isn't available in this environment.
-    """
-
-
-def try_import(module: str, name: str) -> Any:
-    """Return the result of 'from module import name', or NotPresent if the
-    module or attribute doesn't exist.
-    """
-    try:
-        ns = importlib.import_module(module)
-    except ImportError:
-        return NotPresent
-    try:
-        return getattr(ns, name)
-    except AttributeError:  # pragma: no cover
-        return NotPresent
-
-
-# The type of the context manager returned by trio.open_nursery()
-TrioNurseryManager = try_import("trio._core._run", "NurseryManager")
-
-# The type of the context manager object returned by a function that is
-# decorated with @async_generator.asynccontextmanager
-AGCMBackport = try_import("async_generator._util", "_AsyncGeneratorContextManager")
-
-# The type of the async generator iterator returned by a function that is
-# decorated with @async_generator.async_generator
-AsyncGeneratorBackport = try_import("async_generator._impl", "AsyncGenerator")
-
-# The type of the internal awaitable used in @async_generator backport
-# asend/athrow calls
-AsyncGeneratorBackportNextIter = try_import("async_generator._impl", "ANextIter")
-
-# The type of the context manager returned by greenback.async_context()
-GreenbackAsyncContext = try_import("greenback", "async_context")
-
-
-def _get_native_awaitable_types():
-    async def some_asyncgen():
-        yield
-
-    aw = some_asyncgen().asend(None)
-    asend_type = type(aw)
-    aw.close()
-    aw = some_asyncgen().athrow(ValueError)
-    athrow_type = type(aw)
-    aw.close()
-
-    async def some_afn():
-        pass
-
-    aw = some_afn()
-    coro_wrapper_type = type(aw.__await__())
-    aw.close()
-
-    return asend_type, athrow_type, coro_wrapper_type
-
-
-# The types of the internal awaitables used in native async generator
-# asend/athrow calls, and the coroutine_wrapper type returned by
-# <coroutine object>.__await__()
-(
-    AsyncGeneratorASend, AsyncGeneratorAThrow, CoroutineWrapperType
-) = _get_native_awaitable_types()
+            yield from crawl_context(this_frame, context)
+    yield FrameInfo(this_frame)
 
 
 if sys.version_info >= (3, 7):
@@ -737,179 +700,82 @@ if sys.version_info >= (3, 7):
     # @contextlib.asynccontextmanager
     from contextlib import _GeneratorContextManagerBase as GCMBase  # type: ignore
     from contextlib import AsyncExitStack
-else:
-    from contextlib import _GeneratorContextManager as GCMBase
-
     # async_exit_stack.AsyncExitStack is an alias for
     # contextlib.AsyncExitStack on Pythons that have the latter, so
     # there's no need to consider both separately.
-    AsyncExitStack = try_import("async_exit_stack", "AsyncExitStack")
-
-
-def _determine_skip_code_objects() -> Iterator[types.CodeType]:
-    yield Traceback.of.__func__.__code__
-    yield Traceback.since.__func__.__code__
-    yield Traceback.until.__func__.__code__
-    yield Traceback._make.__func__.__code__
-
-    # greenback_shim has special-case handling, but that handling gets skipped
-    # if the coroutine is currently executing, and we still want to elide the
-    # internal frames in that case.
-    yield _greenback_shim.__code__
-
-    # outcome.send() is quite noisy in tracebacks when using
-    # greenback, and it's hard to think of any other case where you'd
-    # care about it either -- if you see 'something.send(coro)' in one frame
-    # and you're inside coro in the next, it's pretty obvious what's going on.
+else:
+    from contextlib import _GeneratorContextManager as GCMBase
     try:
-        from outcome import Value, Error
+        from async_exit_stack import AsyncExitStack
     except ImportError:
-        pass
-    else:
-        yield Value.send.__code__
-        yield Error.send.__code__
-
-    if AsyncGeneratorBackport is not NotPresent:
-        import async_generator
-
-        @async_generator.async_generator
-        async def noop_agen():
-            pass  # pragma: no cover
-
-        # Skip internal frames corresponding to asend() and athrow()
-        # coroutines for the @async_generator backport. The native
-        # versions are written in C, so won't show up regardless.
-        agen_iter = noop_agen()
-        asend_coro = agen_iter.asend(None)
-        yield asend_coro.cr_code
-        asend_coro.close()
-
-        # Skip frames from async_generator.yield_() too.
-        yield async_generator._impl.yield_.__code__
-        yield async_generator._impl._yield_.__code__
-
-    if TrioNurseryManager is not NotPresent:
-        import trio
-
-        # Skip frames corresponding to common lowest-level Trio traps,
-        # so that the traceback ends where someone says 'await
-        # wait_task_rescheduled(...)' or similar.  The guts are not
-        # interesting and they otherwise show up *everywhere*.
-        yield trio.lowlevel.cancel_shielded_checkpoint.__code__
-        yield trio.lowlevel.wait_task_rescheduled.__code__
-        yield trio._core._traps._async_yield.__code__
+        class AsyncExitStack:
+            pass
 
 
+# The type of the context manager object returned by a function that is
+# decorated with @async_generator.asynccontextmanager
 try:
-    SKIP_CODE_OBJECTS.update(_determine_skip_code_objects())
-except Exception as exc:  # pragma: no cover
-    warnings.warn(
-        "Couldn't initialize code objects to skip. Tracebacks may have some "
-        "extraneous frames. Please file an issue at "
-        "https://github.com/oremanj/asynctb/issues/new",
-        RuntimeWarning,
-    )
+    from async_generator._util import _AsyncGeneratorContextManager as AGCMBackport
+except ImportError:
+    class AGCMBackport:
+        pass
 
 
-def frame_from_owner(owner: Any) -> Optional[types.FrameType]:
-    """Return the outermost frame object associated with *owner*,
-    a coroutine or generator iterator. Returns None if *owner*
+def frame_from_genlike(genlike: GeneratorLike) -> Optional[types.FrameType]:
+    """Return the outermost frame object associated with *genlike*,
+    a coroutine or generator iterator. Returns None if *genlike*
     has already completed execution. Raises an exception if it's
     not a coroutine or generator iterator.
     """
-    if isinstance(owner, AsyncGeneratorBackport):
-        owner = owner._coroutine
-    if isinstance(owner, types.CoroutineType):
-        return owner.cr_frame
-    if isinstance(owner, types.GeneratorType):
-        return owner.gi_frame
-    if isinstance(owner, types.AsyncGeneratorType):
-        return owner.ag_frame
+    if isinstance(genlike, types.CoroutineType):
+        return genlike.cr_frame
+    if isinstance(genlike, types.GeneratorType):
+        return genlike.gi_frame
+    if isinstance(genlike, types.AsyncGeneratorType):
+        return genlike.ag_frame
     raise RuntimeError(
         "Couldn't determine the frame associated with {}.{} {!r}".format(
-            getattr(type(owner), "__module__", "??"),
-            type(owner).__qualname__,
-            owner,
+            getattr(type(genlike), "__module__", "??"),
+            type(genlike).__qualname__,
+            genlike,
         ),
     )
 
 
-def next_from_owner(owner: Any) -> Any:
-    """Given *owner*, a coroutine or generator iterator, return the other
-    coroutine/generator/iterator/awaitable that *owner* is awaiting or
+def next_from_genlike(genlike: GeneratorLike) -> Any:
+    """Given *genlike*, a coroutine or generator iterator, return the other
+    coroutine/generator/iterator/awaitable that *genlike* is awaiting or
     yielding-from.
     """
-    if isinstance(owner, AsyncGeneratorBackport):
-        owner = owner._coroutine
-    if isinstance(owner, types.CoroutineType):
-        if owner.cr_running:
+    if isinstance(genlike, types.CoroutineType):
+        if genlike.cr_running:
             return RUNNING
-        return owner.cr_await
-    elif isinstance(owner, types.GeneratorType):
-        if owner.gi_running:
+        return genlike.cr_await
+    elif isinstance(genlike, types.GeneratorType):
+        if genlike.gi_running:
             return RUNNING
-        return owner.gi_yieldfrom
-    elif isinstance(owner, types.AsyncGeneratorType):
+        return genlike.gi_yieldfrom
+    elif isinstance(genlike, types.AsyncGeneratorType):
         # On 3.8+, ag_running is true even if the generator
         # is blocked on an event loop trap. Those will
         # have ag_await != None (because the only way to
         # block on an event loop trap is to await something),
         # and we want to treat them as suspended for
         # traceback extraction purposes.
-        if owner.ag_running and owner.ag_await is None:
+        if genlike.ag_running and genlike.ag_await is None:
             return RUNNING
-        return owner.ag_await
+        return genlike.ag_await
     else:
         return None
 
 
-def unwrap_owner(owner: Any) -> Any:
-    """Return the coroutine or generator iterator underlying
-    the awaitable/iterator *owner*. Currently this can look
-    inside async generator asend/athrow and coroutine_wrapper.
-    """
-    while True:
-        if isinstance(owner, AsyncGeneratorBackportNextIter):
-            owner = owner._it
-            continue
-
-        if isinstance(owner, (AsyncGeneratorASend, AsyncGeneratorAThrow)):
-            # native async generator awaitable, which holds a
-            # reference to its agen but doesn't expose it
-            for referent in gc.get_referents(owner):
-                if hasattr(referent, "ag_frame"):
-                    owner = referent
-                    break
-            else:
-                raise RuntimeError(
-                    f"{owner!r} doesn't refer to anything with an ag_frame attribute"
-                )
-            continue
-
-        if isinstance(owner, CoroutineWrapperType):
-            # these refer to only one other object, the underlying coroutine
-            for referent in gc.get_referents(owner):
-                if hasattr(referent, "cr_frame"):
-                    owner = referent
-                    break
-            else:
-                raise RuntimeError(
-                    f"{owner!r} doesn't refer to anything with a cr_frame attribute"
-                )
-            continue
-
-        return owner
-
-
 def crawl_context(
-    owner: object,
     frame: types.FrameType,
     context: ContextInfo,
     override_line: Optional[str] = None,
 ) -> Iterator[FrameInfo]:
     """Yield a series of FrameInfos for the context manager described in *context*,
-    which is a context manager active in *frame* which is associated with the
-    awaitable/generator *owner* (if any).
+    which is a context manager active in *frame*.
 
     The first yielded FrameInfo introduces the context manager, by referring to the
     line in *frame* at which the 'with' or 'async with' block begins; its
@@ -933,15 +799,9 @@ def crawl_context(
     status is yielded recursively.
     """
 
-    manager = context.manager
-    if isinstance(manager, GreenbackAsyncContext):
-        manager = manager._cm
-    if isinstance(manager, TrioNurseryManager):
-        manager = manager._nursery
-
+    manager = unwrap_context_manager(context.manager)
     lineno = context.start_line or 0
     yield FrameInfo(
-        owner=owner,
         frame=frame,
         lineno=lineno,
         context_manager=manager,
@@ -959,13 +819,9 @@ def crawl_context(
         # is currently exiting, since we'll see them later in the traceback
         # anyway
         if isinstance(manager, GCMBase):
-            yield from frames_from_producer(
-                iterate_suspended(manager.gen, with_context_info=True)
-            )
+            yield from iterate_suspended(manager.gen, with_context_info=True)
         elif isinstance(manager, AGCMBackport):
-            yield from frames_from_producer(
-                iterate_suspended(manager._agen, with_context_info=True)
-            )
+            yield from iterate_suspended(manager._agen, with_context_info=True)
 
 
 def format_funcname(func: object) -> str:
@@ -1066,7 +922,6 @@ def crawl_exit_stack(
             arg = format_funcname(callback)
 
         yield from crawl_context(
-            owner=None,
             frame=frame,
             context=ContextInfo(
                 is_async=not is_sync,
