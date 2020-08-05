@@ -1,12 +1,13 @@
 import contextlib
 import gc
-import pytest
+import pytest  # type: ignore
 import re
 import sys
 import threading
 import types
 from contextlib import ExitStack, contextmanager
 from functools import partial
+from typing import List, Callable, Any
 from .. import FrameInfo, Traceback
 
 
@@ -42,7 +43,7 @@ def assert_tb_matches(tb, expected, error=None):
                 assert expect_ctx_typename is None
             else:
                 assert type(entry.context_manager).__name__ == expect_ctx_typename
-    except Exception:
+    except Exception:  # pragma: no cover
         print_assert_matches("tb")
         raise
 
@@ -953,7 +954,7 @@ def test_greenback():
                     )
                     yield from ()
 
-            greenback.await_(ExtractWhenAwaited())
+            greenback.await_(ExtractWhenAwaited())  # pragma: no cover
 
     async def inner():
         with null_context():
@@ -1082,9 +1083,9 @@ def test_exitstack_formatting():
         )
 
 
-ACM_IMPLS = []
+ACM_IMPLS: List[Callable[..., Any]] = []
 try:
-    ACM_IMPLS.append(contextlib.asynccontextmanager)
+    ACM_IMPLS.append(contextlib.asynccontextmanager)  # type: ignore
 except AttributeError:
     pass
 try:
@@ -1101,8 +1102,8 @@ def test_asyncexitstack_foramtting(asynccontextmanager):
         from contextlib import AsyncExitStack
     except ImportError:
         try:
-            from async_exit_stack import AsyncExitStack
-        except ImportError:
+            from async_exit_stack import AsyncExitStack  # type: ignore
+        except ImportError:  # pragma: no cover
             pytest.skip("no AsyncExitStack")
 
     class A:

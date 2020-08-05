@@ -1,5 +1,6 @@
 import attr
 import functools
+import inspect
 import types
 from typing import (
     Any,
@@ -13,6 +14,7 @@ from typing import (
     Tuple,
     TypeVar,
     Union,
+    cast,
     overload,
 )
 from typing_extensions import Protocol
@@ -25,14 +27,7 @@ F_get_target = TypeVar("F_get_target", bound=Callable[[types.FrameType, bool], A
 F = TypeVar("F", bound=Callable[..., Any])
 
 
-class RegisterFn(Protocol):
-    @overload
-    def __call__(self, __fn: F_unwrap) -> F_unwrap:
-        ...
-
-    @overload
-    def __call__(self, __ty: type) -> Callable[[F_unwrap], F_unwrap]:
-        ...
+RegisterFn = Callable[[F_unwrap], F_unwrap]
 
 
 def make_unwrapper(name: str) -> Tuple[Callable[[Any], Any], RegisterFn]:
@@ -51,7 +46,7 @@ def make_unwrapper(name: str) -> Tuple[Callable[[Any], Any], RegisterFn]:
         setattr(unwrap_repeatedly, attr, "unwrap_" + name)
         setattr(unwrap_once.register, attr, "register_unwrap_" + name)
 
-    return unwrap_repeatedly, unwrap_once.register
+    return unwrap_repeatedly, cast(RegisterFn, unwrap_once.register)
 
 
 unwrap_awaitable, register_unwrap_awaitable = make_unwrapper("awaitable")
@@ -97,20 +92,23 @@ class IdentityDict(MutableMapping[K, V]):
             return self._data == other._data
         return super().__eq__(other)
 
+    _marker = object()
+
     @overload
     def pop(self, key: K) -> V:
         ...
 
     @overload
-    def pop(self, key: K, default: T) -> Union[V, T]:
+    def pop(self, key: K, default: Union[V, T] = ...) -> Union[V, T]:
         ...
 
-    def pop(self, key: K, *default: object) -> object:
-        if len(default) > 1:
-            raise TypeError("pop() takes 1 or 2 positional arguments")
-        if default:
-            default = ((None, default[0]),)
-        return self._data.pop(id(key), *default)[1]
+    def pop(self, key: K, default: object = _marker) -> object:
+        try:
+            return self._data.pop(id(key))[1]
+        except KeyError:
+            if default is self._marker:
+                raise
+            return default
 
     def popitem(self) -> Tuple[K, V]:
         return self._data.popitem()[1]
@@ -118,8 +116,8 @@ class IdentityDict(MutableMapping[K, V]):
     def clear(self) -> None:
         self._data.clear()
 
-    def setdefault(self, key: K, value: V) -> V:
-        return self._data.setdefault(id(key), (key, value))[1]
+    def setdefault(self, key: K, default: V = cast(V, None)) -> V:
+        return self._data.setdefault(id(key), (key, default))[1]
 
 
 @attr.s(auto_attribs=True, slots=True, eq=False)
@@ -141,7 +139,7 @@ def get_code(thing: object, *nested_names: str) -> types.CodeType:
             thing = thing.__func__
             continue
         if hasattr(thing, "__wrapped__"):
-            thing = inspect.unwrap(thing)
+            thing = inspect.unwrap(cast(types.FunctionType, thing))
             continue
         break
 
@@ -203,7 +201,7 @@ def customize(
                 fn,
                 skip_frame=skip_frame,
                 skip_callees=skip_callees,
-                unwrap_suspended=unwrap_suspended,
+                get_target=get_target,
             )
             return fn
 

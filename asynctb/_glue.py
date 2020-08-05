@@ -2,22 +2,18 @@ import gc
 import traceback
 import types
 import warnings
-from typing import Any, AsyncIterator
+from typing import Any, AsyncGenerator
 from . import _registry
 
 
 def glue_native() -> None:
-    async def some_asyncgen() -> AsyncIterator[None]:
+    async def some_asyncgen() -> AsyncGenerator[None, None]:
         yield  # pragma: no cover
 
     # Get the types of the internal awaitables used in native async
     # generator asend/athrow calls
-    aw = some_asyncgen().asend(None)
-    asend_type = type(aw)
-    aw.close()
-    aw = some_asyncgen().athrow(ValueError)
-    athrow_type = type(aw)
-    aw.close()
+    asend_type = type(some_asyncgen().asend(None))
+    athrow_type = type(some_asyncgen().asend(None))
 
     async def some_afn() -> None:
         pass
@@ -79,7 +75,9 @@ def glue_async_generator() -> None:
     def unwrap_async_generator_backport(agen: Any) -> Any:
         return agen._coroutine
 
-    @_registry.register_unwrap_awaitable(async_generator._impl.ANextIter)
+    from async_generator._impl import ANextIter  # type: ignore
+
+    @_registry.register_unwrap_awaitable(ANextIter)
     def unwrap_async_generator_backport_next_iter(aw: Any) -> Any:
         return aw._it
 
@@ -109,7 +107,7 @@ def glue_trio() -> None:
     try:
         lowlevel = trio.lowlevel
     except ImportError:
-        lowlevel = trio.hazmat
+        lowlevel = trio.hazmat  # type: ignore
 
     # Skip frames corresponding to common lowest-level Trio traps,
     # so that the traceback ends where someone says 'await

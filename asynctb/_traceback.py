@@ -24,6 +24,8 @@ from typing import (
     Sequence,
     Tuple,
     Union,
+    TYPE_CHECKING,
+    cast,
 )
 
 from ._frames import ContextInfo, contexts_active_in_frame
@@ -35,7 +37,11 @@ from ._registry import (
 )
 
 try:
-    from greenlet import greenlet as GreenletType, getcurrent as greenlet_getcurrent
+    if not TYPE_CHECKING:
+        from greenlet import (
+            greenlet as GreenletType,
+            getcurrent as greenlet_getcurrent,
+        )
 except ImportError:
 
     class GreenletType:
@@ -130,9 +136,11 @@ class FrameInfo:
         if not capture_locals:
             save_locals = None
         elif self.context_manager is not None:
-            save_locals = {"<context manager>": self.context_manager}
+            save_locals = {"<context manager>": repr(self.context_manager)}
         else:
-            save_locals = self.frame.f_locals
+            save_locals = {
+                name: repr(value) for name, value in self.frame.f_locals.items()
+            }
 
         return traceback.FrameSummary(
             self.frame.f_code.co_filename,
@@ -346,8 +354,15 @@ class Traceback:
         stringified object representations of all local variables in each frame.
         """
         return traceback.StackSummary.from_list(
-            frame.as_stdlib_summary(capture_locals=capture_locals)
-            for frame in self.frames
+            [
+                cast(
+                    # typeshed doesn't understand that FrameSummary
+                    # implements this tuple protocol too
+                    Tuple[str, int, str, Optional[str]],
+                    frame.as_stdlib_summary(capture_locals=capture_locals),
+                )
+                for frame in self.frames
+            ]
         )
 
 
@@ -464,14 +479,15 @@ def iterate_running(
     # to innermost.
     frames: List[types.FrameType] = []
 
-    def get_true_caller() -> Optional[types.FrameType]:
+    def get_true_caller() -> types.FrameType:
         # Return the frame that called into the traceback-producing machinery.
         # That will be at least 3 frames up (iterate_running, Traceback._make,
         # Traceback.of/since/until) and might be more if we've done some mode
         # switching.
-        caller = sys._getframe(3)
+        caller: Optional[types.FrameType] = sys._getframe(3)
         while caller is not None and caller.f_globals is globals():
             caller = caller.f_back
+        assert caller is not None
         return caller
 
     if sys.implementation.name == "cpython" and greenlet_getcurrent().parent:
@@ -492,7 +508,7 @@ def iterate_running(
         # PyPy uses a more sensible scheme where the f_back links in the
         # current callstack always work, so it doesn't need this trick.
         this_thread_frames: List[types.FrameType] = []
-        greenlet = greenlet_getcurrent()
+        greenlet: Optional[GreenletType] = greenlet_getcurrent()
         current: Optional[types.FrameType] = get_true_caller()
         while greenlet is not None:
             while current is not None:
@@ -599,7 +615,9 @@ def iterate_running(
             "can't continue traceback"
         )
 
-    for this_frame, next_frame in zip(frames, frames[1:] + [None]):
+    for this_frame, next_frame in zip(
+        frames, cast(List[Optional[types.FrameType]], frames[1:]) + [None]
+    ):
         keep_going = yield from handle_frame(
             this_frame=this_frame,
             next_frame=next_frame,
@@ -709,24 +727,29 @@ if sys.version_info >= (3, 7):
     # contextlib.AsyncExitStack on Pythons that have the latter, so
     # there's no need to consider both separately.
 else:
-    from contextlib import _GeneratorContextManager as GCMBase
+    GCMBase: Any
 
-    try:
-        from async_exit_stack import AsyncExitStack
-    except ImportError:
+    class AsyncExitStack:
+        pass
 
-        class AsyncExitStack:
+    if not TYPE_CHECKING:
+        from contextlib import _GeneratorContextManager as GCMBase
+        try:
+            from async_exit_stack import AsyncExitStack
+        except ImportError:
             pass
 
 
 # The type of the context manager object returned by a function that is
 # decorated with @async_generator.asynccontextmanager
 try:
-    from async_generator._util import _AsyncGeneratorContextManager as AGCMBackport
+    if not TYPE_CHECKING:
+        from async_generator._util import _AsyncGeneratorContextManager as AGCMBackport
 except ImportError:
 
     class AGCMBackport:
-        pass
+        _agen: AsyncGenerator[Any, Any]
+        _func_name: str
 
 
 def frame_from_genlike(genlike: GeneratorLike) -> Optional[types.FrameType]:
@@ -840,7 +863,7 @@ def format_funcname(func: object) -> str:
         return repr(func)
 
 
-def format_funcargs(args: Sequence[Any], kw: Mapping[str, Any]) -> str:
+def format_funcargs(args: Sequence[Any], kw: Mapping[str, Any]) -> List[str]:
     argdescs = [repr(arg) for arg in args]
     kwdescs = [f"{k}={v!r}" for k, v in kw.items()]
     return argdescs + kwdescs
@@ -914,7 +937,7 @@ def crawl_exit_stack(
             assert callback.__closure__ is not None
             arg = ", ".join(
                 [
-                    format_funcname(callback.__wrapped__),
+                    format_funcname(callback.__wrapped__),  # type: ignore
                     *format_funcargs(
                         callback.__closure__[args_idx].cell_contents,
                         callback.__closure__[kwds_idx].cell_contents,
