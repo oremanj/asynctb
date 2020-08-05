@@ -62,9 +62,7 @@ def glue_async_generator() -> None:
         import async_generator
     except ImportError:
         return
-    _registry.customize(
-        async_generator.yield_, skip_frame=True, skip_callees=True
-    )
+    _registry.customize(async_generator.yield_, skip_frame=True, skip_callees=True)
 
     @async_generator.async_generator
     async def noop_agen() -> None:
@@ -124,7 +122,9 @@ def glue_trio() -> None:
         "permanently_detach_coroutine_object",
     ):
         if hasattr(lowlevel, trap):
-            _registry.customize(getattr(lowlevel, trap), skip_frame=True, skip_callees=True)
+            _registry.customize(
+                getattr(lowlevel, trap), skip_frame=True, skip_callees=True
+            )
 
     @_registry.register_unwrap_context_manager(type(trio.open_nursery()))
     def unwrap_nursery_manager(cm: Any) -> Any:
@@ -196,7 +196,9 @@ def install_all():
                     "Failed to initialize glue for {}: {}. Some tracebacks may be "
                     "presented less crisply or with missing information.".format(
                         name[5:],
-                        "".join(traceback.format_exception_only(type(exc), exc)).strip(),
+                        "".join(
+                            traceback.format_exception_only(type(exc), exc)
+                        ).strip(),
                     ),
                     RuntimeWarning,
                 )

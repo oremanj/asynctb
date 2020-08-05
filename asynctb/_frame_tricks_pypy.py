@@ -59,15 +59,14 @@ def _pypy_typename(obj: object) -> str:
     return _pypy_type_desc_from_index[pgc.get_rpy_type_index(obj)]
 
 
-
 def _pypy_typename_from_first_word(first_word: int) -> str:
     """Return the pypy interpreter-level type name of the type of the instance
     whose first word in memory has the value *first_word*.
     """
-    if sys.maxsize > 2**32:
-        mask = 0xffffffff
+    if sys.maxsize > 2 ** 32:
+        mask = 0xFFFFFFFF
     else:
-        mask = 0xffff
+        mask = 0xFFFF
     return _pypy_type_desc_from_index[_pypy_type_index_from_id[first_word & mask]]
 
 
@@ -77,7 +76,7 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
     # Somewhere in the list of immediate referents of the frame is its
     # code object.
     frame_refs = pgc.get_rpy_referents(frame)
-    code_idx, = [idx for idx, ref in enumerate(frame_refs) if ref is frame.f_code]
+    (code_idx,) = [idx for idx, ref in enumerate(frame_refs) if ref is frame.f_code]
 
     # The two referents immediately before the code object are
     # the last entry in the block list, followed by the value stack.
@@ -96,10 +95,9 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
             # There are no blocks active in this frame. lastblock was
             # skipped when getting referents because it's null, so the
             # previous field (generator weakref or f_back) bled through.
-            assert (
-                _pypy_typename(candidate) == "GcStruct weakref"
-                or "Frame" in _pypy_typename(candidate)
-            )
+            assert _pypy_typename(
+                candidate
+            ) == "GcStruct weakref" or "Frame" in _pypy_typename(candidate)
         else:
             assert isinstance(candidate, pgc.GcRef)
             lastblock_ref = candidate

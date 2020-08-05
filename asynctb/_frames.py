@@ -71,8 +71,9 @@ def contexts_active_in_frame(frame: types.FrameType) -> List[ContextInfo]:
             except Exception as ex:
                 warnings.warn(
                     "Inspection trickery doesn't work on this interpreter: {!r}. "
-                    "Task tree printing will be less accurate. Please file a bug."
-                    .format(ex)
+                    "Task tree printing will be less accurate. Please file a bug.".format(
+                        ex
+                    )
                 )
                 traceback.print_exc()
                 _can_use_trickery = False
@@ -83,8 +84,9 @@ def contexts_active_in_frame(frame: types.FrameType) -> List[ContextInfo]:
         except Exception as ex:
             warnings.warn(
                 "Inspection trickery failed on frame {!r}: {!r}. "
-                "Task tree printing will be less accurate. Please file a bug."
-                .format(frame, ex)
+                "Task tree printing will be less accurate. Please file a bug.".format(
+                    frame, ex
+                )
             )
             traceback.print_exc()
             return _contexts_active_by_referents(frame)
@@ -106,9 +108,9 @@ def _contexts_active_by_referents(frame: types.FrameType) -> List[ContextInfo]:
     """
     ret: List[ContextInfo] = []
     for referent in gc.get_referents(frame):
-        if (
-            isinstance(referent, types.MethodType)
-            and referent.__func__.__name__ in ("__exit__", "__aexit__")
+        if isinstance(referent, types.MethodType) and referent.__func__.__name__ in (
+            "__exit__",
+            "__aexit__",
         ):
             # 'with' and 'async with' statements push a reference to the
             # __exit__ or __aexit__ method that they'll call when exiting.
@@ -142,7 +144,7 @@ def _contexts_active_by_trickery(frame: types.FrameType) -> List[ContextInfo]:
     ret = [
         attr.evolve(
             with_block_info[block.handler],
-            manager=frame_details.stack[block.level - 1].__self__  # type: ignore
+            manager=frame_details.stack[block.level - 1].__self__,  # type: ignore
         )
         for block in with_blocks
     ]

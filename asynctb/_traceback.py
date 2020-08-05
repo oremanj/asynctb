@@ -28,12 +28,16 @@ from typing import (
 
 from ._frames import ContextInfo, contexts_active_in_frame
 from ._registry import (
-    unwrap_awaitable, unwrap_context_manager, CodeHandling, HANDLING_FOR_CODE
+    unwrap_awaitable,
+    unwrap_context_manager,
+    CodeHandling,
+    HANDLING_FOR_CODE,
 )
 
 try:
     from greenlet import greenlet as GreenletType, getcurrent as greenlet_getcurrent
 except ImportError:
+
     class GreenletType:
         parent: Optional["GreenletType"] = None
         gr_frame: Optional[types.FrameType]
@@ -511,7 +515,7 @@ def iterate_running(
         except ValueError:
             pass
         else:
-            frames = this_thread_frames[to_idx : from_idx : -1]
+            frames = this_thread_frames[to_idx:from_idx:-1]
 
     def try_from(potential_inner_frame: types.FrameType) -> List[types.FrameType]:
         """If potential_inner_frame has outer_frame somewhere up its callstack,
@@ -700,14 +704,17 @@ if sys.version_info >= (3, 7):
     # @contextlib.asynccontextmanager
     from contextlib import _GeneratorContextManagerBase as GCMBase  # type: ignore
     from contextlib import AsyncExitStack
+
     # async_exit_stack.AsyncExitStack is an alias for
     # contextlib.AsyncExitStack on Pythons that have the latter, so
     # there's no need to consider both separately.
 else:
     from contextlib import _GeneratorContextManager as GCMBase
+
     try:
         from async_exit_stack import AsyncExitStack
     except ImportError:
+
         class AsyncExitStack:
             pass
 
@@ -717,6 +724,7 @@ else:
 try:
     from async_generator._util import _AsyncGeneratorContextManager as AGCMBackport
 except ImportError:
+
     class AGCMBackport:
         pass
 
@@ -770,9 +778,7 @@ def next_from_genlike(genlike: GeneratorLike) -> Any:
 
 
 def crawl_context(
-    frame: types.FrameType,
-    context: ContextInfo,
-    override_line: Optional[str] = None,
+    frame: types.FrameType, context: ContextInfo, override_line: Optional[str] = None,
 ) -> Iterator[FrameInfo]:
     """Yield a series of FrameInfos for the context manager described in *context*,
     which is a context manager active in *frame*.

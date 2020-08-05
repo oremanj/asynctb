@@ -1,7 +1,20 @@
 import attr
 import functools
 import types
-from typing import Any, Callable, Dict, Generic, Iterable, Iterator, MutableMapping, Optional, Tuple, TypeVar, Union, overload
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    Generic,
+    Iterable,
+    Iterator,
+    MutableMapping,
+    Optional,
+    Tuple,
+    TypeVar,
+    Union,
+    overload,
+)
 from typing_extensions import Protocol
 
 T = TypeVar("T")
@@ -148,8 +161,8 @@ def get_code(thing: object, *nested_names: str) -> types.CodeType:
                 break
         else:
             raise ValueError(
-                f"Couldn't find a function or class named {name!r} in " +
-                ".".join([top_name, *nested_names[:idx]])
+                f"Couldn't find a function or class named {name!r} in "
+                + ".".join([top_name, *nested_names[:idx]])
             )
 
     return code
@@ -184,6 +197,7 @@ def customize(
     get_target: Optional[Callable[[types.FrameType, bool], Any]] = None,
 ) -> object:
     if thing is None:
+
         def decorate(fn: F) -> F:
             customize(
                 fn,

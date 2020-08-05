@@ -6,6 +6,7 @@ from types import FrameType
 from typing import List, Tuple, Type
 from ._frames import FrameDetails
 
+
 def inspect_frame(frame: FrameType) -> FrameDetails:
     assert sys.implementation.name == "cpython"
 
@@ -143,10 +144,9 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
             stack_validity_limit = max(blk.level for blk in details.blocks)
         else:
             stack_validity_limit = 0
-        del stack[stack_validity_limit :]
+        del stack[stack_validity_limit:]
         details.stack = [
-            None
-            if address == 0
+            None if address == 0
             # Needs ignore till https://github.com/python/typeshed/pull/4311 is released
             else ctypes.cast(address, ctypes.py_object).value  # type: ignore
             for address in stack
