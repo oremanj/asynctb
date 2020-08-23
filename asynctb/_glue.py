@@ -13,15 +13,15 @@ def glue_native() -> None:
     # Get the types of the internal awaitables used in native async
     # generator asend/athrow calls
     asend_type = type(some_asyncgen().asend(None))
-    athrow_type = type(some_asyncgen().asend(None))
+    athrow_type = type(some_asyncgen().athrow(ValueError))
 
     async def some_afn() -> None:
         pass
 
     # Get the coroutine_wrapper type returned by <coroutine object>.__await__()
-    aw = some_afn()
-    coro_wrapper_type = type(aw.__await__())
-    aw.close()
+    coro = some_afn()
+    coro_wrapper_type = type(coro.__await__())
+    coro.close()
 
     @_registry.register_unwrap_awaitable(asend_type)
     @_registry.register_unwrap_awaitable(athrow_type)
@@ -44,13 +44,6 @@ def glue_native() -> None:
         raise RuntimeError(
             f"{aw!r} doesn't refer to anything with a cr_frame attribute"
         )
-
-
-def glue_asynctb() -> None:
-    from ._traceback import Traceback
-
-    for method in ("of", "since", "until", "_make"):
-        _registry.customize(getattr(Traceback, method), skip_frame=True)
 
 
 def glue_async_generator() -> None:
@@ -151,7 +144,7 @@ def glue_greenback() -> None:
         gr_frame = getattr(child_greenlet, "gr_frame", None)
         if gr_frame is not None:
             # Yep; switch to walking the greenlet stack, since orig_coro
-            # will look "running" but it's not on any thread's stack./
+            # will look "running" but it's not on any thread's stack.
             return child_greenlet
         elif orig_coro is not None:
             # No greenlet, so child is suspended at a regular await.

@@ -944,7 +944,7 @@ def test_greenback():
                             ),
                             (
                                 "middle",
-                                "greenback.await_(ExtractWhenAwaited())",
+                                "greenback.await_(ExtractWhenAwaited())  # pragma: no cover",
                                 None,
                                 None,
                             ),

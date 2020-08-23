@@ -52,6 +52,7 @@ except ImportError:
         return GreenletType()
 
 
+# We'll use the name "genlike" to refer to an instance of any of these types
 GeneratorLike = Union[
     Generator[Any, Any, Any], AsyncGenerator[Any, Any], Coroutine[Any, Any, Any]
 ]
@@ -119,10 +120,11 @@ class FrameInfo:
         self, *, capture_locals: bool = False
     ) -> traceback.FrameSummary:
         """Return a representation of this frame as a standard
-        `traceback.FrameSummary`. The result can be pickled and will
-        not keep frames alive, at the expense of some loss of information.
+        `traceback.FrameSummary`. Unlike this `FrameInfo` object, the
+        result can be pickled and will not keep frames alive, at the
+        expense of some loss of information.
 
-        If this frame introduces a context manager in an ref:`enhanced traceback
+        If this frame introduces a context manager in an :ref:`enhanced traceback
         <enhanced-tb>`, information about the name and type of the context manager
         will be appended to the function *name* in the returned
         `~traceback.FrameSummary`, in parentheses after a space. This results
@@ -131,6 +133,7 @@ class FrameInfo:
         If *capture_locals* is True, then the returned `~traceback.FrameSummary`
         will contain the stringified object representations of all local variables
         in this frame.
+
         """
         funcname = self.funcname + self._context_descr
         if not capture_locals:
@@ -173,10 +176,13 @@ class Traceback:
 
     You can get a `Traceback` for a coroutine, greenlet, or (sync or
     async) generator using :meth:`Traceback.of`, or for the current
-    stack using :meth:`Traceback.since`.
+    stack using :meth:`Traceback.since` or :meth:`Traceback.until`.
     """
 
+    #: The frames that have been extracted as part of this traceback.
     frames: Sequence[FrameInfo]
+
+    #: The error that prevented us from extracting more `frames`, if any.
     error: Optional[Exception] = None
 
     @classmethod
@@ -260,7 +266,7 @@ class Traceback:
         is True (the default), or a basic traceback if *with_context_info* is False.
         """
         if outer_frame is not None and not isinstance(outer_frame, types.FrameType):
-            raise TypeError(f"outer_frame must be a frame, not {outer_frame!r}")
+            raise TypeError(f"outer_frame must be a frame, not {type(outer_frame)!r}")
         return cls._make(iterate_running(outer_frame, None, with_context_info))
 
     @classmethod
@@ -305,8 +311,7 @@ class Traceback:
                 limit -= 1
         else:
             raise TypeError(
-                "'limit' argument must be a frame or integer, not "
-                + type(limit).__name__
+                f"'limit' argument must be a frame or integer, not {type(limit)!r}"
             )
 
         return cls._make(iterate_running(outer_frame, inner_frame, with_context_info))
@@ -636,7 +641,27 @@ def handle_frame(
     is_terminal: bool,
     switch_count: int,
 ) -> Generator[FrameInfo, None, bool]:
-    """ XXX document """
+    """Yield traceback information related to a single frame, *this_frame*.
+
+    *next_frame* should preview the following frame in the traceback.
+    Its information will not be yielded during this call, but it will be
+    used to provide more detail on any context manager that is currently
+    being exited.
+
+    If *with_context_info* is False, this will usually be just a single FrameInfo.
+    If *with_context_info* is True, it will include additional FrameInfos for
+    each context manager active in *this_frame*, and might include even more
+    frames representing the state of those context managers.
+
+    If *this_frame* is for a function that manages a suspended callstack,
+    as registered using :func:`customize` or :func:`register_get_target`,
+    then :func:`handle_frame` will descend into that callstack, yielding
+    all of its frames.
+
+    Returns true if the caller should continue tracebacking into more
+    frames (if those exist), or false if the traceback should be
+    artificially cut off here.
+    """
 
     handling = HANDLING_FOR_CODE.get(this_frame.f_code, _default_handling)
 
@@ -679,6 +704,8 @@ def handle_frame(
                 )
         except Exception:
             if handling.skip_frame:
+                # We didn't yield the frame traceback before, so yield it now
+                # to clarify which frame resulted in the exception
                 yield from one_frame_traceback(this_frame, None, False)
             raise
 
@@ -693,15 +720,15 @@ def one_frame_traceback(
     """Yield a series of FrameInfos representing a single frame
     *this_frame* in the straight-line traceback.
 
-    If *this_frame* is executing any of the code objects named in
-    SKIP_CODE_OBJECTS, then nothing will be yielded. Otherwise,
-    yields a series of zero or more FrameInfos describing the
-    context managers active in *this_frame* (only if with_context_info is True)
-    followed by one FrameInfo describing *this_frame* itself (always).
+    If with_context_info is True, yields a series of zero or more
+    FrameInfos describing the context managers active in
+    *this_frame*. Then, unconditionally yields one FrameInfo
+    describing *this_frame* itself.
 
     *next_frame* should be the next inner frame in the traceback after
     *this_frame*, or None; it is used to determine the context manager
     object currently being exited, if any.
+
     """
     if with_context_info:
         for context in contexts_active_in_frame(this_frame):

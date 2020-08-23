@@ -27,7 +27,7 @@ F_get_target = TypeVar("F_get_target", bound=Callable[[types.FrameType, bool], A
 F = TypeVar("F", bound=Callable[..., Any])
 
 
-RegisterFn = Callable[[F_unwrap], F_unwrap]
+RegisterFn = Callable[[type], Callable[[F_unwrap], F_unwrap]]
 
 
 def make_unwrapper(name: str) -> Tuple[Callable[[Any], Any], RegisterFn]:
@@ -107,7 +107,7 @@ class IdentityDict(MutableMapping[K, V]):
             return self._data.pop(id(key))[1]
         except KeyError:
             if default is self._marker:
-                raise
+                raise KeyError(key) from None
             return default
 
     def popitem(self) -> Tuple[K, V]:
@@ -218,7 +218,7 @@ def customize(
     return None
 
 
-def register_get_target(fn: Callable[..., Any]) -> Callable[[F], F]:
+def register_get_target(fn: Callable[..., Any]) -> Callable[[F_get_target], F_get_target]:
     def decorate(get_target: F_get_target) -> F_get_target:
         customize(fn, get_target=get_target)
         return get_target
