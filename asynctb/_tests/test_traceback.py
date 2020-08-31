@@ -8,7 +8,7 @@ import types
 from contextlib import ExitStack, contextmanager
 from functools import partial
 from typing import List, Callable, Any
-from .. import FrameInfo, Traceback
+from .. import FrameInfo, Traceback, customize, register_get_target
 
 
 def remove_address_details(line):
@@ -116,18 +116,28 @@ else:
     null_context_repr = "asynctb._tests.test_traceback.null_context()"
 
 
-def test_running():
-    def sync_example(root):
-        with outer_context():
-            if isinstance(root, types.FrameType):
-                return Traceback.since(root)
-            else:
-                return Traceback.of(root)
+# There's some logic in the traceback extraction of running code that
+# behaves differently when it's run in a non-main greenlet on CPython,
+# because we have to stitch together the traceback portions from
+# different greenlets. To exercise it, we'll run some tests in a
+# non-main greenlet as well as at top level.
+try:
+    import greenlet  # type: ignore
+except ImportError:
+    def try_in_other_greenlet_too(fn):
+        return fn
+else:
+    def try_in_other_greenlet_too(fn):
+        def try_both():
+            fn()
+            greenlet.greenlet(fn).switch()
+        return try_both
 
-    sync_example_tbdata = [
-        ("sync_example", "with outer_context():", None, "_GeneratorContextManager"),
+
+def frames_from_inner_context(caller):
+    return [
         (
-            "outer_context",
+            caller,
             "with inner_context() as inner:",
             "inner",
             "_GeneratorContextManager",
@@ -153,16 +163,42 @@ def test_running():
             None,
         ),
         ("inner_context", "yield", None, None),
+    ]
+
+
+def frames_from_outer_context(caller):
+    return [
+        (caller, "with outer_context():", None, "_GeneratorContextManager"),
+        *frames_from_inner_context("outer_context"),
         ("outer_context", "yield", None, None),
     ]
+
+
+@try_in_other_greenlet_too
+def test_running():
+    # These two layers of indirection are mostly to test that skip_callees
+    # works when using iterate_running.
+    @customize(skip_frame=True, skip_callees=True)
+    def call_call_traceback_since(root):
+        return call_traceback_since(root)
+
+    def call_traceback_since(root):
+        return Traceback.since(root)
+
+    def sync_example(root):
+        with outer_context():
+            if isinstance(root, types.FrameType):
+                return call_call_traceback_since(root)
+            else:
+                return Traceback.of(root)
 
     # Currently running in this thread
     assert_tb_matches(
         sync_example(sys._getframe(0)),
         [
             ("test_running", "sync_example(sys._getframe(0)),", None, None),
-            *sync_example_tbdata,
-            ("sync_example", "return Traceback.since(root)", None, None),
+            *frames_from_outer_context("sync_example"),
+            ("sync_example", "return call_call_traceback_since(root)", None, None),
         ],
     )
 
@@ -198,7 +234,7 @@ def test_running():
             send(it),
             [
                 (which.__name__, line, None, None),
-                *sync_example_tbdata,
+                *frames_from_outer_context("sync_example"),
                 ("sync_example", "return Traceback.of(root)", None, None),
             ],
         )
@@ -239,40 +275,7 @@ def test_suspended():
             ("async_example", "return await async_example(depth - 1)", None, None),
             ("async_example", "return await async_example(depth - 1)", None, None),
             ("async_example", "return await async_example(depth - 1)", None, None),
-            (
-                "async_example",
-                "with outer_context():",
-                None,
-                "_GeneratorContextManager",
-            ),
-            (
-                "outer_context",
-                "with inner_context() as inner:",
-                "inner",
-                "_GeneratorContextManager",
-            ),
-            ("inner_context", "with stack:", "stack", "ExitStack"),
-            (
-                "inner_context",
-                f"# stack.enter_context({null_context_repr})",
-                "stack[0]",
-                "_GeneratorContextManager",
-            ),
-            ("null_context", "yield", None, None),
-            (
-                "inner_context",
-                "# stack.push(asynctb._tests.test_traceback.exit_cb)",
-                "stack[1]",
-                None,
-            ),
-            (
-                "inner_context",
-                "# stack.callback(asynctb._tests.test_traceback.other_cb, 10, 'hi', answer=42)",
-                "stack[2]",
-                None,
-            ),
-            ("inner_context", "yield", None, None),
-            ("outer_context", "yield", None, None),
+            *frames_from_outer_context("async_example"),
             ("async_example", "return await async_yield(1)", None, None),
             ("async_yield", "return (yield value)", None, None),
         ],
@@ -330,11 +333,23 @@ def test_suspended():
 def test_greenlet():
     greenlet = pytest.importorskip("greenlet")
 
+    tb_main = Traceback.of(greenlet.getcurrent())
+    assert tb_main.error is None and tb_main.frames[-1].funcname == "test_greenlet"
+
     def outer():
         with outer_context():
             return inner()
 
     def inner():
+        # Test getting the traceback of a greenlet from inside it
+        assert_tb_matches(
+            Traceback.of(gr),
+            [
+                *frames_from_outer_context("outer"),
+                ('outer', 'return inner()', None, None),
+                ('inner', 'Traceback.of(gr),', None, None),
+            ],
+        )
         return greenlet.getcurrent().parent.switch(1)
 
     gr = greenlet.greenlet(outer)
@@ -344,35 +359,7 @@ def test_greenlet():
     assert_tb_matches(
         Traceback.of(gr),
         [
-            ("outer", "with outer_context():", None, "_GeneratorContextManager"),
-            (
-                "outer_context",
-                "with inner_context() as inner:",
-                "inner",
-                "_GeneratorContextManager",
-            ),
-            ("inner_context", "with stack:", "stack", "ExitStack"),
-            (
-                "inner_context",
-                f"# stack.enter_context({null_context_repr})",
-                "stack[0]",
-                "_GeneratorContextManager",
-            ),
-            ("null_context", "yield", None, None),
-            (
-                "inner_context",
-                "# stack.push(asynctb._tests.test_traceback.exit_cb)",
-                "stack[1]",
-                None,
-            ),
-            (
-                "inner_context",
-                "# stack.callback(asynctb._tests.test_traceback.other_cb, 10, 'hi', answer=42)",
-                "stack[2]",
-                None,
-            ),
-            ("inner_context", "yield", None, None),
-            ("outer_context", "yield", None, None),
+            *frames_from_outer_context("outer"),
             ("outer", "return inner()", None, None),
             ("inner", "return greenlet.getcurrent().parent.switch(1)", None, None),
         ],
@@ -380,6 +367,47 @@ def test_greenlet():
 
     assert 2 == gr.switch(2)
     assert_tb_matches(Traceback.of(gr), [])  # dead -> empty tb
+
+    # Test tracing into the runner for a dead greenlet
+
+    def trivial_runner(gr):
+        assert_tb_matches(
+            Traceback.since(sys._getframe(0)),
+            [("trivial_runner", "Traceback.since(sys._getframe(0)),", None, None)],
+        )
+
+    @register_get_target(trivial_runner)
+    def get_target(frame, is_terminal):
+        return frame.f_locals.get("gr")
+
+    trivial_runner(gr)
+
+
+def test_get_target_fails():
+    outer_frame = sys._getframe(0)
+
+    def inner():
+        return Traceback.since(outer_frame)
+
+    @customize(get_target=lambda *args: {}["wheee"])
+    def example():
+        return inner()
+
+    # Frames that produce an error get mentioned in the traceback,
+    # even if they'd otherwise be skipped
+    @customize(skip_frame=True, get_target=lambda *args: {}["wheee"])
+    def skippy_example():
+        return inner()
+
+    for fn in (example, skippy_example):
+        assert_tb_matches(
+            fn(),
+            [
+                ('test_get_target_fails', 'fn(),', None, None),
+                (fn.__name__, 'return inner()', None, None),
+            ],
+            error=KeyError('wheee'),
+        )
 
 
 @pytest.mark.skipif(
@@ -445,33 +473,7 @@ def test_exiting():
             ),
             ("async_capture_tb", "pass", None, None),
             ("__exit__", "next(self.gen)", None, None),
-            (
-                "capture_tb_on_exit",
-                "with inner_context() as inner:",
-                "inner",
-                "_GeneratorContextManager",
-            ),
-            ("inner_context", "with stack:", "stack", "ExitStack"),
-            (
-                "inner_context",
-                f"# stack.enter_context({null_context_repr})",
-                "stack[0]",
-                "_GeneratorContextManager",
-            ),
-            ("null_context", "yield", None, None),
-            (
-                "inner_context",
-                "# stack.push(asynctb._tests.test_traceback.exit_cb)",
-                "stack[1]",
-                None,
-            ),
-            (
-                "inner_context",
-                "# stack.callback(asynctb._tests.test_traceback.other_cb, 10, 'hi', answer=42)",
-                "stack[2]",
-                None,
-            ),
-            ("inner_context", "yield", None, None),
+            *frames_from_inner_context("capture_tb_on_exit"),
             ("capture_tb_on_exit", "result = Traceback.of(coro)", None, None),
         ],
     )
@@ -514,12 +516,17 @@ def test_errors():
         Traceback.until(sys._getframe(1), limit=sys._getframe(0))
 
 
+@try_in_other_greenlet_too
 def test_traceback_until():
     outer = sys._getframe(0)
 
     def example():
         inner = sys._getframe(0)
-        tb1, tb2, tb3 = [Traceback.until(inner, limit=lim) for lim in (1, outer, None)]
+
+        def get_tb(limit):
+            return Traceback.until(inner, limit=limit)
+
+        tb1, tb2, tb3 = [get_tb(lim) for lim in (1, outer, None)]
         assert tb1 == tb2
         assert tb3.frames[-len(tb1) :] == tb1.frames
         assert_tb_matches(
@@ -528,7 +535,7 @@ def test_traceback_until():
                 ("test_traceback_until", "example()", None, None),
                 (
                     "example",
-                    "tb1, tb2, tb3 = [Traceback.until(inner, limit=lim) for lim in (1, outer, None)]",
+                    "tb1, tb2, tb3 = [get_tb(lim) for lim in (1, outer, None)]",
                     None,
                     None,
                 ),
@@ -538,6 +545,7 @@ def test_traceback_until():
     example()
 
 
+@try_in_other_greenlet_too
 def test_running_in_thread():
     def thread_example(arrived_evt, depart_evt):
         with outer_context():
@@ -563,40 +571,7 @@ def test_running_in_thread():
             Traceback.since(top_frame),
             [
                 ("thread_caller", "thread_example(*args)", None, None),
-                (
-                    "thread_example",
-                    "with outer_context():",
-                    None,
-                    "_GeneratorContextManager",
-                ),
-                (
-                    "outer_context",
-                    "with inner_context() as inner:",
-                    "inner",
-                    "_GeneratorContextManager",
-                ),
-                ("inner_context", "with stack:", "stack", "ExitStack"),
-                (
-                    "inner_context",
-                    f"# stack.enter_context({null_context_repr})",
-                    "stack[0]",
-                    "_GeneratorContextManager",
-                ),
-                ("null_context", "yield", None, None),
-                (
-                    "inner_context",
-                    "# stack.push(asynctb._tests.test_traceback.exit_cb)",
-                    "stack[1]",
-                    None,
-                ),
-                (
-                    "inner_context",
-                    "# stack.callback(asynctb._tests.test_traceback.other_cb, 10, 'hi', answer=42)",
-                    "stack[2]",
-                    None,
-                ),
-                ("inner_context", "yield", None, None),
-                ("outer_context", "yield", None, None),
+                *frames_from_outer_context("thread_example"),
                 ("thread_example", "depart_evt.wait()", None, None),
                 ("wait", "with self._cond:", None, "Condition"),
                 ("wait", "signaled = self._cond.wait(timeout)", None, None),
@@ -650,35 +625,7 @@ def test_threaded_race():
         assert_tb_matches(
             Traceback.of(coro),
             [
-                ("async_fn", "with outer_context():", None, "_GeneratorContextManager"),
-                (
-                    "outer_context",
-                    "with inner_context() as inner:",
-                    "inner",
-                    "_GeneratorContextManager",
-                ),
-                ("inner_context", "with stack:", "stack", "ExitStack"),
-                (
-                    "inner_context",
-                    f"# stack.enter_context({null_context_repr})",
-                    "stack[0]",
-                    "_GeneratorContextManager",
-                ),
-                ("null_context", "yield", None, None),
-                (
-                    "inner_context",
-                    "# stack.push(asynctb._tests.test_traceback.exit_cb)",
-                    "stack[1]",
-                    None,
-                ),
-                (
-                    "inner_context",
-                    "# stack.callback(asynctb._tests.test_traceback.other_cb, 10, 'hi', answer=42)",
-                    "stack[2]",
-                    None,
-                ),
-                ("inner_context", "yield", None, None),
-                ("outer_context", "yield", None, None),
+                *frames_from_outer_context("async_fn"),
                 ("async_fn", "await async_yield(1)", None, None),
                 ("async_yield", "return (yield value)", None, None),
             ],
@@ -1097,7 +1044,7 @@ else:
 
 
 @pytest.mark.parametrize("asynccontextmanager", ACM_IMPLS)
-def test_asyncexitstack_foramtting(asynccontextmanager):
+def test_asyncexitstack_formatting(asynccontextmanager):
     try:
         from contextlib import AsyncExitStack
     except ImportError:
@@ -1142,7 +1089,7 @@ def test_asyncexitstack_foramtting(asynccontextmanager):
         expect_name = "amgr(...)"
     else:
         expect_name = (
-            "asynctb._tests.test_traceback.test_asyncexitstack_foramtting."
+            "asynctb._tests.test_traceback.test_asyncexitstack_formatting."
             "<locals>.amgr()"
         )
 
@@ -1168,13 +1115,13 @@ def test_asyncexitstack_foramtting(asynccontextmanager):
             ("async_fn", "# stack.push_async_exit(<A>.aexit)", "stack[2]", "A"),
             (
                 "async_fn",
-                "# stack.push_async_exit(asynctb._tests.test_traceback.test_asyncexitstack_foramtting.<locals>.aexit2)",
+                "# stack.push_async_exit(asynctb._tests.test_traceback.test_asyncexitstack_formatting.<locals>.aexit2)",
                 "stack[3]",
                 None,
             ),
             (
                 "async_fn",
-                "# stack.push_async_callback(asynctb._tests.test_traceback.test_asyncexitstack_foramtting.<locals>.acallback, 'hi')",
+                "# stack.push_async_callback(asynctb._tests.test_traceback.test_asyncexitstack_formatting.<locals>.acallback, 'hi')",
                 "stack[4]",
                 None,
             ),

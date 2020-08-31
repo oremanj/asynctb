@@ -178,7 +178,7 @@ def glue_greenback() -> None:
 
 
 def install_all():
-    for name, fn in globals().items():
+    for name, fn in list(globals().items()):
         if name.startswith("glue_"):
             try:
                 fn()

@@ -222,7 +222,17 @@ class Traceback:
                 # since it's running in this thread, its stack is our own
                 inner_frame = sys._getframe(1)
                 if stackref.parent is not None:
-                    outer_frame = stackref.parent.gr_frame
+                    outer_frame = inner_frame
+                    assert outer_frame is not None
+
+                    # On CPython the end of this greenlet's stack is marked
+                    # by None. On PyPy it gets seamlessly attached to its
+                    # parent's stack.
+                    while (
+                        outer_frame.f_back is not stackref.parent.gr_frame
+                        and outer_frame.f_back is not None
+                    ):
+                        outer_frame = outer_frame.f_back
             producer = iterate_running(
                 outer_frame, inner_frame, with_context_info, stackref
             )
@@ -461,7 +471,9 @@ def iterate_running(
     coroutine or greenlet, pass *parent* as that generator or
     coroutine or greenlet. This is used to switch back to
     iterate_suspended() if a generator or coroutine stops running (in
-    another thread) while we're looking, and to
+    another thread) while we're looking. (We don't currently do
+    anything special with a greenlet *parent*, but maybe we'll want to
+    at some point.)
 
     If *with_context_info* is True, yield additional frames
     representing context managers, to produce an enhanced traceback.
@@ -668,9 +680,6 @@ def handle_frame(
     if not handling.skip_frame:
         yield from one_frame_traceback(this_frame, next_frame, with_context_info)
 
-    if handling.skip_callees:
-        return False
-
     if handling.get_target is not None:
         try:
             target = handling.get_target(this_frame, is_terminal)
@@ -687,14 +696,13 @@ def handle_frame(
                         parent=target,
                         switch_count=switch_count + 1,
                     )
-                elif target:
-                    # not dead, so lack of gr_frame means running, but it's
-                    # not running in this thread because it was reached from
-                    # a suspended coroutine/etc -- so it must be running in
-                    # another thread
-                    raise RuntimeError(
-                        "Can't trace into a greenlet running in another thread"
-                    )
+                # If gr_frame is None, the greenlet is dead, not
+                # started, or is running in another thread. If it's
+                # running, then its frames are probably next on the
+                # stack we're inspecting, and we have no way to access
+                # them if they're not.  If it's dead or not started,
+                # then there's nothing to yield.  So in all of those
+                # cases we yield nothing.
             elif target is not None:
                 # This frame is the runner for a genlike
                 yield from iterate_suspended(
@@ -709,7 +717,7 @@ def handle_frame(
                 yield from one_frame_traceback(this_frame, None, False)
             raise
 
-    return True
+    return not handling.skip_callees
 
 
 def one_frame_traceback(
@@ -823,7 +831,9 @@ def next_from_genlike(genlike: GeneratorLike) -> Any:
         if genlike.ag_running and genlike.ag_await is None:
             return RUNNING
         return genlike.ag_await
-    else:
+    else:  # pragma: no cover
+        # frame_from_genlike() is always called first, and it raises
+        # if the argument isn't genlike, so shouldn't be able to get here
         return None
 
 
