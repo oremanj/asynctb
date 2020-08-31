@@ -1,4 +1,5 @@
 import gc
+import sys
 import traceback
 import types
 import warnings
@@ -120,6 +121,23 @@ def glue_trio() -> None:
     @_registry.register_unwrap_context_manager(type(trio.open_nursery()))
     def unwrap_nursery_manager(cm: Any) -> Any:
         return cm._nursery
+
+
+def glue_greenlet_pypy() -> None:
+    try:
+        import greenlet  # type: ignore
+    except ImportError:
+        return
+    if sys.implementation.name != "pypy":
+        return
+
+    # pypy greenlet is written in Python on top of the pypy-specific
+    # module _continuation.  Hide traceback frames for its internals
+    # for better consistency with CPython.
+    _registry.customize(greenlet.greenlet.switch, skip_frame=True)
+    _registry.customize(greenlet.greenlet._greenlet__switch, skip_frame=True)
+    _registry.customize(greenlet._greenlet_start, skip_frame=True)
+    _registry.customize(greenlet._greenlet_throw, skip_frame=True)
 
 
 def glue_greenback() -> None:

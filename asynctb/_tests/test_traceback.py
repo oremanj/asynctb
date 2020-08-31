@@ -645,12 +645,13 @@ def test_unknown_awaitable():
 
     coro = example()
     assert 42 == coro.send(None)
+    name = "sequence" if sys.implementation.name == "pypy" else "list_"
     assert_tb_matches(
         Traceback.of(coro),
         [("example", "await WeirdObject()", None, None)],
         error=RuntimeError(
-            "Couldn't determine the frame associated with builtins.list_iterator "
-            "<list_iterator object at (address)>",
+            f"Couldn't determine the frame associated with builtins.{name}iterator "
+            f"<{name}iterator object at (address)>",
         ),
     )
 
@@ -740,6 +741,19 @@ def test_with_trickery_disabled(monkeypatch):
         with outer_context():
             return Traceback.since(root)
 
+    # CPython GC doesn't crawl currently executing frames, so we get more
+    # data without trickery on PyPy than on CPython
+    only_on_pypy = [
+        ('sync_example', '', None, '_GeneratorContextManager'),
+        ('outer_context', '', None, '_GeneratorContextManager'),
+        ('inner_context', '', None, 'ExitStack'),
+        ('inner_context', '# _.enter_context(asynctb._tests.test_traceback.null_context())', '_[0]', '_GeneratorContextManager'),
+        ('null_context', 'yield', None, None),
+        ('inner_context', '# _.push(asynctb._tests.test_traceback.exit_cb)', '_[1]', None),
+        ('inner_context', "# _.callback(asynctb._tests.test_traceback.other_cb, 10, 'hi', answer=42)", '_[2]', None),
+        ('inner_context', 'yield', None, None),
+        ('outer_context', 'yield', None, None),
+    ]
     assert_tb_matches(
         sync_example(sys._getframe(0)),
         [
@@ -749,6 +763,7 @@ def test_with_trickery_disabled(monkeypatch):
                 None,
                 None,
             ),
+            *(only_on_pypy if sys.implementation.name == "pypy" else []),
             ("sync_example", "return Traceback.since(root)", None, None),
         ],
     )

@@ -308,7 +308,13 @@ class Traceback:
             outer_frame = None
         elif isinstance(limit, types.FrameType):
             outer_frame = inner_frame
-            while outer_frame is not limit and outer_frame is not None:
+            while (
+                outer_frame is not limit
+                and outer_frame is not None
+                # This last condition catches suspended greenlets in PyPy,
+                # whose f_back members form a cycle.
+                and outer_frame.f_back is not inner_frame
+            ):
                 outer_frame = outer_frame.f_back
             if outer_frame is None:
                 raise RuntimeError(
@@ -316,7 +322,11 @@ class Traceback:
                 )
         elif isinstance(limit, int):
             outer_frame = inner_frame
-            while limit > 0 and outer_frame is not None:
+            while (
+                limit > 0
+                and outer_frame is not None
+                and outer_frame.f_back is not inner_frame
+            ):
                 outer_frame = outer_frame.f_back
                 limit -= 1
         else:
@@ -561,10 +571,14 @@ def iterate_running(
         current: Optional[types.FrameType] = potential_inner_frame
         while current is not None:
             frames.append(current)
-            if current is outer_frame:
+            # Note: suspended greenlets on PyPy have frames that form a cycle,
+            # thus the 2nd part of this condition
+            if current is outer_frame or (
+                outer_frame is None and current.f_back is potential_inner_frame
+            ):
                 break
             current = current.f_back
-        if current is outer_frame:
+        if current is outer_frame or outer_frame is None:
             return frames[::-1]
         return []
 

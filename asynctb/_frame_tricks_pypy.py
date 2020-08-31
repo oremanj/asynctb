@@ -3,7 +3,7 @@ import dis
 import gc
 import sys
 from types import FrameType
-from typing import Dict, Iterator, List, Optional, Sequence, Type, TYPE_CHECKING
+from typing import Dict, Iterator, List, Optional, Sequence, Type, TYPE_CHECKING, cast
 from ._frames import FrameDetails
 
 
@@ -91,7 +91,8 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
     lastblock_ref: Optional[pgc.GcRef] = None
     if code_idx >= 2:
         candidate = frame_refs[code_idx - 2]
-        if "Block" not in _pypy_typename(candidate):
+        typename = _pypy_typename(candidate)
+        if "Block" not in typename and "SysExcInfoRestorer" not in typename:
             # There are no blocks active in this frame. lastblock was
             # skipped when getting referents because it's null, so the
             # previous field (generator weakref or f_back) bled through.
@@ -123,48 +124,71 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
             for ref in more:
                 assert isinstance(ref, pgc.GcRef)
                 blocks.append(ref)
-        assert all("Block" in _pypy_typename(blk) for blk in blocks)
+        assert all(
+            "Block" in name or "SysExcInfo" in name
+            for blk in blocks for name in [_pypy_typename(blk)]
+        )
         # Reverse so the oldest block is at the beginning
         blocks = blocks[::-1]
         # Remove those that aren't FinallyBlocks -- those are the
         # only ones we care about (used for context managers too)
         blocks = [blk for blk in blocks if "FinallyBlock" in _pypy_typename(blk)]
 
-    # This seems to be necessary to reliably make the object representations
-    # correct before we start peeking at them.
-    gc.collect()
+    # With the default (incminimark) GC, id() of a young object
+    # returns the address it will live in after the next minor
+    # collection, but doesn't move it there. Perform a minor
+    # collection so we can look at the object representations using
+    # ctypes below.
+    #
+    # Annoyingly, there's no way to directly perform a minor
+    # collection.  gc.collect() performs a major collection, which is
+    # quite slow to do on every frame traversal. gc.collect_step()
+    # usually does at least a minor collection, but for the last step
+    # of each major collection it runs finalizers instead. So we try
+    # one collect_step(), and if it was the last step in a major
+    # collection then we do another one.
+    if pgc.collect_step().major_is_done:
+        pgc.collect_step()
 
-    def unwrap_gcref(ref: pgc.GcRef) -> "ctypes.pointer[ctypes.c_ulong]":
-        ref_p = ctypes.pointer(ctypes.c_ulong.from_address(id(ref)))
-        assert "W_GcRef" in _pypy_typename_from_first_word(ref_p[0].value)
-        return ctypes.pointer(ctypes.c_ulong.from_address(ref_p[1].value))
+    # We cast ctypes.pointer[ctypes.c_ulong] to Sequence[int] because
+    # typeshed incorrectly thinks indexing the pointer produces a c_ulong.
+    # In reality it produces an int.
+    def pointer(val: ctypes.c_ulong) -> Sequence[int]:
+        return cast(Sequence[int], ctypes.pointer(val))
+
+    def unwrap_gcref(ref: pgc.GcRef) -> Sequence[int]:
+        ref_p = pointer(ctypes.c_ulong.from_address(id(ref)))
+        assert "W_GcRef" in _pypy_typename_from_first_word(ref_p[0])
+        return pointer(ctypes.c_ulong.from_address(ref_p[1]))
 
     # Fill in nulls in the value stack. This requires inspecting the
     # memory that backs the list object. An RPython list is two words
     # (typeid, length) followed by one word per element.
-    def build_full_stack(refs: Sequence[object]) -> Iterator[object]:
+    def build_full_stack(refs: Sequence[object]) -> List[object]:
         assert isinstance(valuestack_ref, pgc.GcRef)
         stackdata_p = unwrap_gcref(valuestack_ref)
-        assert _pypy_typename_from_first_word(stackdata_p[0].value) == (
+        assert _pypy_typename_from_first_word(stackdata_p[0]) == (
             "GcArray of * GcStruct object"
         )
         ref_iter = iter(refs)
-        for idx in range(stackdata_p[1].value):
-            if stackdata_p[2 + idx].value == 0:
-                yield None
+        result: List[object] = []
+        for idx in range(stackdata_p[1]):
+            if stackdata_p[2 + idx] == 0:
+                result.append(None)
             else:
                 try:
-                    yield next(ref_iter)
+                    result.append(next(ref_iter))
                 except StopIteration:
                     break
+        return result
 
     details = FrameDetails(stack=list(build_full_stack(valuestack)))
     for block_ref in blocks:
         block_p = unwrap_gcref(block_ref)
-        assert _pypy_typename_from_first_word(block_p[0].value) == (
+        assert _pypy_typename_from_first_word(block_p[0]) == (
             "GcStruct pypy.interpreter.pyopcode.FinallyBlock"
         )
         details.blocks.append(
-            FrameDetails.FinallyBlock(handler=block_p[1].value, level=block_p[3].value)
+            FrameDetails.FinallyBlock(handler=block_p[1], level=block_p[3])
         )
     return details

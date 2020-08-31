@@ -45,7 +45,15 @@ def contexts_active_in_frame(frame: types.FrameType) -> List[ContextInfo]:
     global _can_use_trickery
 
     if _can_use_trickery is None:
-        _can_use_trickery = sys.implementation.name in ("cpython", "pypy")
+        _can_use_trickery = (
+            sys.implementation.name == "cpython"
+            or (
+                sys.implementation.name == "pypy"
+                and sys.pypy_translation_info[  # type: ignore
+                    "translation.gc"
+                ] == "incminimark"
+            )
+        )
         if _can_use_trickery:
             from contextlib import contextmanager
 
@@ -71,20 +79,26 @@ def contexts_active_in_frame(frame: types.FrameType) -> List[ContextInfo]:
             except Exception as ex:
                 warnings.warn(
                     "Inspection trickery doesn't work on this interpreter: {!r}. "
-                    "Task tree printing will be less accurate. Please file a bug.".format(
-                        ex
-                    )
+                    "Enhanced tracebacks will be less detailed. Please file a "
+                    "bug.".format(ex)
                 )
                 traceback.print_exc()
                 _can_use_trickery = False
+        else:
+            warnings.warn(
+                "Inspection trickery is not supported on this interpreter: "
+                "need either CPython, or PyPy with incminimark GC. "
+                "Enhanced tracebacks will be less detailed."
+            )
 
     if _can_use_trickery:
         try:
             return _contexts_active_by_trickery(frame)
         except Exception as ex:
+            import pdb; pdb.post_mortem(ex.__traceback__)
             warnings.warn(
                 "Inspection trickery failed on frame {!r}: {!r}. "
-                "Task tree printing will be less accurate. Please file a bug.".format(
+                "Enhanced tracebacks will be less detailed. Please file a bug.".format(
                     frame, ex
                 )
             )
@@ -250,10 +264,15 @@ def _currently_exiting_context(frame: types.FrameType) -> Optional[_ExitingConte
         and code[frame.f_lasti + 2] == op["WITH_CLEANUP_FINISH"]
     ):
         return _ExitingContext(is_async=False, cleanup_offset=frame.f_lasti)
-    if code[frame.f_lasti : frame.f_lasti + 6 : 2] == bytes(
-        [op["LOAD_CONST"], op["YIELD_FROM"], op["WITH_CLEANUP_FINISH"]]
-    ):
-        offs = frame.f_lasti - 2
+
+    # PyPy suspends with lasti pointing at the YIELD_FROM; CPython suspends
+    # with lasti pointing just before it (at LOAD_CONST).
+    if bytes([op["YIELD_FROM"], op["WITH_CLEANUP_FINISH"]]) in code[
+        frame.f_lasti : frame.f_lasti + 6 : 2
+    ]:
+        offs = frame.f_lasti - (4 if code[frame.f_lasti] == op["YIELD_FROM"] else 2)
+        if code[offs + 2] != op["LOAD_CONST"]:  # pragma: no cover
+            return None
         while code[offs] == op["EXTENDED_ARG"]:
             offs -= 2
         if (
