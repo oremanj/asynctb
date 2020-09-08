@@ -1,6 +1,5 @@
 import contextlib
 import gc
-import pytest  # type: ignore
 import re
 import sys
 import threading
@@ -8,6 +7,10 @@ import types
 from contextlib import ExitStack, contextmanager
 from functools import partial
 from typing import List, Callable, Any
+
+import attr
+import pytest  # type: ignore
+
 from .. import FrameInfo, Traceback, customize, register_get_target
 
 
@@ -567,8 +570,16 @@ def test_running_in_thread():
             top_frame.f_back is not None and top_frame.f_code.co_name != "thread_caller"
         ):
             top_frame = top_frame.f_back
+        tb = Traceback.since(top_frame)
+        while (
+            not tb.frames[-1].filename.endswith("/threading.py")
+            or tb.frames[-1].funcname != "wait"
+        ):  # pragma: no cover
+            # Exactly where we are inside Event.wait() is indeterminate
+            tb = attr.evolve(tb, frames=tb.frames[:-1])
+
         assert_tb_matches(
-            Traceback.since(top_frame),
+            tb,
             [
                 ("thread_caller", "thread_example(*args)", None, None),
                 *frames_from_outer_context("thread_example"),

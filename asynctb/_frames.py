@@ -33,6 +33,10 @@ class ContextInfo:
     start_line: Optional[int] = None
 
 
+class InspectionWarning(RuntimeWarning):
+    pass
+
+
 _can_use_trickery: Optional[bool] = None
 
 
@@ -80,7 +84,8 @@ def contexts_active_in_frame(frame: types.FrameType) -> List[ContextInfo]:
                 warnings.warn(
                     "Inspection trickery doesn't work on this interpreter: {!r}. "
                     "Enhanced tracebacks will be less detailed. Please file a "
-                    "bug.".format(ex)
+                    "bug.".format(ex),
+                    InspectionWarning,
                 )
                 traceback.print_exc()
                 _can_use_trickery = False
@@ -88,19 +93,20 @@ def contexts_active_in_frame(frame: types.FrameType) -> List[ContextInfo]:
             warnings.warn(
                 "Inspection trickery is not supported on this interpreter: "
                 "need either CPython, or PyPy with incminimark GC. "
-                "Enhanced tracebacks will be less detailed."
+                "Enhanced tracebacks will be less detailed.",
+                InspectionWarning,
             )
 
     if _can_use_trickery:
         try:
             return _contexts_active_by_trickery(frame)
         except Exception as ex:
-            import pdb; pdb.post_mortem(ex.__traceback__)
             warnings.warn(
                 "Inspection trickery failed on frame {!r}: {!r}. "
                 "Enhanced tracebacks will be less detailed. Please file a bug.".format(
                     frame, ex
-                )
+                ),
+                InspectionWarning,
             )
             traceback.print_exc()
             return _contexts_active_by_referents(frame)
@@ -322,7 +328,10 @@ def _describe_assignment_target(
                 # fmt: on
             ):
                 stack.append(insn.argval)
-            elif insn.opname in ("LOAD_ATTR", "LOAD_METHOD", "STORE_ATTR"):
+            elif insn.opname in (
+                # LOOKUP_METHOD is pypy-only
+                "LOAD_ATTR", "LOAD_METHOD", "LOOKUP_METHOD", "STORE_ATTR"
+            ):
                 obj = stack.pop()
                 stack.append(f"{obj}.{insn.argval}")
             elif insn.opname == "LOAD_CONST":
@@ -340,17 +349,26 @@ def _describe_assignment_target(
                 after = [next_target() for _ in range(insn.argval >> 8)]
                 stack.append(format_tuple(before + [f"*{rest}"] + after))
             elif insn.opname in ("CALL_FUNCTION", "CALL_METHOD"):
-                args = stack[-insn.argval :]
-                del stack[-insn.argval :]
+                if insn.argval == 0:
+                    args = []
+                else:
+                    args = stack[-insn.argval :]
+                    del stack[-insn.argval :]
                 func = stack.pop()
                 stack.append("{}({})".format(func, ", ".join(args)))
-            elif insn.opname == "POP_TOP":
+            elif insn.opname == "DUP_TOP":
+                # Walrus assignments get here
+                stack.append(stack[-1])
+            elif insn.opname == "POP_TOP":  # pragma: no cover
+                # No known way to get here -- POP_TOP as sole insn is
+                # handled at the top of this function
                 stack.pop()
             else:
                 raise ValueError(f"{insn.opname} in assignment target not supported")
             if insn.opname.startswith(("STORE_", "UNPACK_")):
                 break
         if len(stack) != 1:
+            # Walrus assignments can get here
             raise ValueError(f"Assignment occurred at unsupported stack depth")
         return stack[0]
 
