@@ -46,7 +46,7 @@ def _fill_pypy_typemaps() -> None:
         _pypy_type_index_from_id[typeid] = idx
 
 
-if sys.implementation.name == "pypy":
+if sys.implementation.name == "pypy":  # pragma: no branch
     _fill_pypy_typemaps()
 
 
@@ -102,6 +102,11 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
         else:
             assert isinstance(candidate, pgc.GcRef)
             lastblock_ref = candidate
+    else:  # pragma: no cover
+        # No known way to get a frame with neither a generator weakref
+        # nor an f_back, which is what would be required to have
+        # the code object as the 2nd referent.
+        pass
 
     # The value stack's referents are everything on the value stack.
     # Unfortunately we can't rely on the indices here because 'del x'

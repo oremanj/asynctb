@@ -32,7 +32,7 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
             # Python versions
         ]
         extra_header_bytes = object().__sizeof__() - 2 * wordsize
-        if extra_header_bytes:
+        if extra_header_bytes:  # pragma: no cover
             _fields_.insert(0, ("ob_debug", ctypes.c_byte * extra_header_bytes))
 
     # Basic sanity checks cross-referencing the values we can get from Python
