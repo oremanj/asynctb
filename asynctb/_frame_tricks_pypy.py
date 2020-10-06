@@ -61,7 +61,8 @@ def _pypy_typename(obj: object) -> str:
 
 def _pypy_typename_from_first_word(first_word: int) -> str:
     """Return the pypy interpreter-level type name of the type of the instance
-    whose first word in memory has the value *first_word*.
+    whose first word in memory (8 bytes on 64-bit, 4 bytes on 32-bit) has the
+    value *first_word*.
     """
     if sys.maxsize > 2 ** 32:
         mask = 0xFFFFFFFF
@@ -89,7 +90,12 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
     assert isinstance(valuestack_ref, pgc.GcRef)
 
     lastblock_ref: Optional[pgc.GcRef] = None
-    if code_idx >= 2:
+    if code_idx >= 2:  # pragma: no branch
+        # Rationale for "no branch": there's no known way to get a
+        # frame with neither a generator weakref nor an f_back, which
+        # is what would be required to have the code object as the 2nd
+        # referent. If we do wind up in that case, then there's nothing
+        # on the block stack and the first referent is the value stack.
         candidate = frame_refs[code_idx - 2]
         typename = _pypy_typename(candidate)
         if "Block" not in typename and "SysExcInfoRestorer" not in typename:
@@ -102,11 +108,6 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
         else:
             assert isinstance(candidate, pgc.GcRef)
             lastblock_ref = candidate
-    else:  # pragma: no cover
-        # No known way to get a frame with neither a generator weakref
-        # nor an f_back, which is what would be required to have
-        # the code object as the 2nd referent.
-        pass
 
     # The value stack's referents are everything on the value stack.
     # Unfortunately we can't rely on the indices here because 'del x'
@@ -183,7 +184,14 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
             else:
                 try:
                     result.append(next(ref_iter))
-                except StopIteration:
+                except StopIteration:  # pragma: no cover
+                    # The value stack has more entries than GC knows about.
+                    # I haven't been able to produce an example of this,
+                    # and I don't think it should be possible, but there's
+                    # no harm in trying to continue on -- every object we're
+                    # returning is a real Python object obtained through
+                    # non-sketchy means, so even if our assumptions are
+                    # wrong we shouldn't segfault.
                     break
         return result
 

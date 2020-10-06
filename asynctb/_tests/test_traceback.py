@@ -571,11 +571,16 @@ def test_running_in_thread():
         ):
             top_frame = top_frame.f_back
         tb = Traceback.since(top_frame)
+
+        # Exactly where we are inside Event.wait() is indeterminate, so
+        # strip frames until we find Event.wait() and then remove it
+
         while (
             not tb.frames[-1].filename.endswith("/threading.py")
             or tb.frames[-1].funcname != "wait"
         ):  # pragma: no cover
-            # Exactly where we are inside Event.wait() is indeterminate
+            tb = attr.evolve(tb, frames=tb.frames[:-1])
+        while tb.frames[-1].filename.endswith("/threading.py"):  # pragma: no cover
             tb = attr.evolve(tb, frames=tb.frames[:-1])
 
         assert_tb_matches(
@@ -584,9 +589,6 @@ def test_running_in_thread():
                 ("thread_caller", "thread_example(*args)", None, None),
                 *frames_from_outer_context("thread_example"),
                 ("thread_example", "depart_evt.wait()", None, None),
-                ("wait", "with self._cond:", None, "Condition"),
-                ("wait", "signaled = self._cond.wait(timeout)", None, None),
-                ("wait", "waiter.acquire()", None, None),
             ],
         )
     finally:

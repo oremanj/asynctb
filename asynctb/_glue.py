@@ -17,7 +17,7 @@ def glue_native() -> None:
     athrow_type = type(some_asyncgen().athrow(ValueError))
 
     async def some_afn() -> None:
-        pass
+        pass  # pragma: no cover
 
     # Get the coroutine_wrapper type returned by <coroutine object>.__await__()
     coro = some_afn()
@@ -30,7 +30,7 @@ def glue_native() -> None:
         # native async generator awaitable, which holds a
         # reference to its agen but doesn't expose it
         for referent in gc.get_referents(aw):
-            if hasattr(referent, "ag_frame"):
+            if hasattr(referent, "ag_frame"):  # pragma: no branch
                 return referent
         raise RuntimeError(
             f"{aw!r} doesn't refer to anything with an ag_frame attribute"
@@ -40,7 +40,7 @@ def glue_native() -> None:
     def unwrap_coroutine_wrapper(aw: Any) -> Any:
         # these refer to only one other object, the underlying coroutine
         for referent in gc.get_referents(aw):
-            if hasattr(referent, "cr_frame"):
+            if hasattr(referent, "cr_frame"):  # pragma: no branch
                 return referent
         raise RuntimeError(
             f"{aw!r} doesn't refer to anything with a cr_frame attribute"
@@ -100,7 +100,8 @@ def glue_trio() -> None:
 
     try:
         lowlevel = trio.lowlevel
-    except ImportError:
+    except ImportError:  # pragma: no cover
+        # Support older Trio versions
         lowlevel = trio.hazmat  # type: ignore
 
     # Skip frames corresponding to common lowest-level Trio traps,
@@ -113,7 +114,7 @@ def glue_trio() -> None:
         "temporarily_detach_coroutine_object",
         "permanently_detach_coroutine_object",
     ):
-        if hasattr(lowlevel, trap):
+        if hasattr(lowlevel, trap):  # pragma: no branch
             _registry.customize(
                 getattr(lowlevel, trap), skip_frame=True, skip_callees=True
             )
@@ -195,9 +196,30 @@ def glue_greenback() -> None:
         return cm._cm
 
 
-def install_all():
-    for name, fn in list(globals().items()):
+INSTALLED: bool = False
+
+
+def ensure_installed():
+    global INSTALLED
+    if INSTALLED:
+        return
+
+    globs = globals()
+    for name in list(globs):
+        # This function might be called concurrently or reentrantly
+        # (imagine a signal handler that prints a backtrace).
+        # Ensure that each glue_xyz() hook is only called once,
+        # by removing it from the global namespace before we call it.
+        # Different hooks can safely execute concurrently because
+        # they modify different items in _registry.HANDLING_FOR_CODE,
+        # and primitive operations on IdentityDict are thread-safe
+        # since they're implemented in terms of primitive operations
+        # on an underlying native dict.
         if name.startswith("glue_"):
+            try:
+                fn = globs.pop(name)
+            except KeyError:
+                continue
             try:
                 fn()
             except Exception as exc:
@@ -212,5 +234,4 @@ def install_all():
                     RuntimeWarning,
                 )
 
-
-install_all()
+    INSTALLED = True

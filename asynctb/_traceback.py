@@ -35,6 +35,7 @@ from ._registry import (
     CodeHandling,
     HANDLING_FOR_CODE,
 )
+from ._glue import ensure_installed as ensure_glue_is_installed
 
 try:
     if not TYPE_CHECKING:
@@ -340,6 +341,7 @@ class Traceback:
     def _make(cls, producer: Iterator[FrameInfo]) -> "Traceback":
         frames: List[FrameInfo] = []
         error: Optional[Exception] = None
+        ensure_glue_is_installed()
         try:
             frames.extend(producer)
         except Exception as exc:

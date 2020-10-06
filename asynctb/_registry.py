@@ -60,6 +60,10 @@ class IdentityDict(MutableMapping[K, V]):
 
     We use this to track code objects, since they have an expensive-to-compute
     hash which is not cached. You can probably think of other uses too.
+
+    Single item lookup, assignment, deletion, and :meth:`setdefault` are
+    thread-safe because they are each implented in terms of a single call to
+    a method of an underlying native dictionary object.
     """
 
     __slots__ = ("_data",)
@@ -68,8 +72,8 @@ class IdentityDict(MutableMapping[K, V]):
         self._data = {id(k): (k, v) for k, v in items}
 
     def __repr__(self) -> str:
-        return "IdentityDict({{{}}})".format(
-            ", ".join(f"{k!r}: {v!r}" for k, v in self._data.values())
+        return "IdentityDict([{}])".format(
+            ", ".join(f"({k!r}, {v!r})" for k, v in self._data.values())
         )
 
     def __len__(self) -> int:
