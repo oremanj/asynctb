@@ -49,14 +49,10 @@ def contexts_active_in_frame(frame: types.FrameType) -> List[ContextInfo]:
     global _can_use_trickery
 
     if _can_use_trickery is None:
-        _can_use_trickery = (
-            sys.implementation.name == "cpython"
-            or (
-                sys.implementation.name == "pypy"
-                and sys.pypy_translation_info[  # type: ignore
-                    "translation.gc"
-                ] == "incminimark"
-            )
+        _can_use_trickery = sys.implementation.name == "cpython" or (
+            sys.implementation.name == "pypy"
+            and sys.pypy_translation_info["translation.gc"]  # type: ignore
+            == "incminimark"
         )
         if _can_use_trickery:
             from contextlib import contextmanager
@@ -273,9 +269,10 @@ def _currently_exiting_context(frame: types.FrameType) -> Optional[_ExitingConte
 
     # PyPy suspends with lasti pointing at the YIELD_FROM; CPython suspends
     # with lasti pointing just before it (at LOAD_CONST).
-    if bytes([op["YIELD_FROM"], op["WITH_CLEANUP_FINISH"]]) in code[
-        frame.f_lasti : frame.f_lasti + 6 : 2
-    ]:
+    if (
+        bytes([op["YIELD_FROM"], op["WITH_CLEANUP_FINISH"]])
+        in code[frame.f_lasti : frame.f_lasti + 6 : 2]
+    ):
         offs = frame.f_lasti - (4 if code[frame.f_lasti] == op["YIELD_FROM"] else 2)
         if code[offs + 2] != op["LOAD_CONST"]:  # pragma: no cover
             return None
@@ -290,7 +287,8 @@ def _currently_exiting_context(frame: types.FrameType) -> Optional[_ExitingConte
 
 
 def _describe_assignment_target(
-    insns: List[dis.Instruction], start_idx: int,
+    insns: List[dis.Instruction],
+    start_idx: int,
 ) -> Optional[str]:
     """Given that insns[start_idx] and beyond constitute a series of
     instructions that assign the top-of-stack value somewhere, this
@@ -330,7 +328,10 @@ def _describe_assignment_target(
                 stack.append(insn.argval)
             elif insn.opname in (
                 # LOOKUP_METHOD is pypy-only
-                "LOAD_ATTR", "LOAD_METHOD", "LOOKUP_METHOD", "STORE_ATTR"
+                "LOAD_ATTR",
+                "LOAD_METHOD",
+                "LOOKUP_METHOD",
+                "STORE_ATTR",
             ):
                 obj = stack.pop()
                 stack.append(f"{obj}.{insn.argval}")

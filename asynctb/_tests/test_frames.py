@@ -114,9 +114,7 @@ def test_unexpected_aexit_sequence():
             pass
 
     op = dis.opmap
-    pattern = [
-        op["WITH_CLEANUP_START"], 0, op["GET_AWAITABLE"], 0, op["LOAD_CONST"], 0
-    ]
+    pattern = [op["WITH_CLEANUP_START"], 0, op["GET_AWAITABLE"], 0, op["LOAD_CONST"], 0]
     co = example.__code__
     example.__code__ = co.replace(
         co_code=co.co_code.replace(

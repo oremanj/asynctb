@@ -222,7 +222,9 @@ def customize(
     return None
 
 
-def register_get_target(fn: Callable[..., Any]) -> Callable[[F_get_target], F_get_target]:
+def register_get_target(
+    fn: Callable[..., Any]
+) -> Callable[[F_get_target], F_get_target]:
     def decorate(get_target: F_get_target) -> F_get_target:
         customize(fn, get_target=get_target)
         return get_target

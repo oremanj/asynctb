@@ -785,6 +785,7 @@ else:
 
     if not TYPE_CHECKING:
         from contextlib import _GeneratorContextManager as GCMBase
+
         try:
             from async_exit_stack import AsyncExitStack
         except ImportError:
@@ -854,7 +855,9 @@ def next_from_genlike(genlike: GeneratorLike) -> Any:
 
 
 def crawl_context(
-    frame: types.FrameType, context: ContextInfo, override_line: Optional[str] = None,
+    frame: types.FrameType,
+    context: ContextInfo,
+    override_line: Optional[str] = None,
 ) -> Iterator[FrameInfo]:
     """Yield a series of FrameInfos for the context manager described in *context*,
     which is a context manager active in *frame*.

@@ -66,6 +66,7 @@ def test_identity_dict():
 # as its argument "arg".
 def simple_get_target(frame, is_terminal):
     if "magic_arg" in frame.f_locals:  # pragma: no branch
+
         def fake_target(arg):
             yield
 
@@ -82,6 +83,7 @@ def current_frame_uses_registered_get_target():
 @pytest.fixture
 def local_registry():
     from asynctb._registry import HANDLING_FOR_CODE
+
     prev_contents = list(HANDLING_FOR_CODE.items())
     HANDLING_FOR_CODE.clear()
     yield

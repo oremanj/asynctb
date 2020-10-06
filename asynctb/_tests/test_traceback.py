@@ -127,13 +127,18 @@ else:
 try:
     import greenlet  # type: ignore
 except ImportError:
+
     def try_in_other_greenlet_too(fn):
         return fn
+
+
 else:
+
     def try_in_other_greenlet_too(fn):
         def try_both():
             fn()
             greenlet.greenlet(fn).switch()
+
         return try_both
 
 
@@ -349,8 +354,8 @@ def test_greenlet():
             Traceback.of(gr),
             [
                 *frames_from_outer_context("outer"),
-                ('outer', 'return inner()', None, None),
-                ('inner', 'Traceback.of(gr),', None, None),
+                ("outer", "return inner()", None, None),
+                ("inner", "Traceback.of(gr),", None, None),
             ],
         )
         return greenlet.getcurrent().parent.switch(1)
@@ -406,10 +411,10 @@ def test_get_target_fails():
         assert_tb_matches(
             fn(),
             [
-                ('test_get_target_fails', 'fn(),', None, None),
-                (fn.__name__, 'return inner()', None, None),
+                ("test_get_target_fails", "fn(),", None, None),
+                (fn.__name__, "return inner()", None, None),
             ],
-            error=KeyError('wheee'),
+            error=KeyError("wheee"),
         )
 
 
@@ -757,15 +762,30 @@ def test_with_trickery_disabled(monkeypatch):
     # CPython GC doesn't crawl currently executing frames, so we get more
     # data without trickery on PyPy than on CPython
     only_on_pypy = [
-        ('sync_example', '', None, '_GeneratorContextManager'),
-        ('outer_context', '', None, '_GeneratorContextManager'),
-        ('inner_context', '', None, 'ExitStack'),
-        ('inner_context', '# _.enter_context(asynctb._tests.test_traceback.null_context())', '_[0]', '_GeneratorContextManager'),
-        ('null_context', 'yield', None, None),
-        ('inner_context', '# _.push(asynctb._tests.test_traceback.exit_cb)', '_[1]', None),
-        ('inner_context', "# _.callback(asynctb._tests.test_traceback.other_cb, 10, 'hi', answer=42)", '_[2]', None),
-        ('inner_context', 'yield', None, None),
-        ('outer_context', 'yield', None, None),
+        ("sync_example", "", None, "_GeneratorContextManager"),
+        ("outer_context", "", None, "_GeneratorContextManager"),
+        ("inner_context", "", None, "ExitStack"),
+        (
+            "inner_context",
+            "# _.enter_context(asynctb._tests.test_traceback.null_context())",
+            "_[0]",
+            "_GeneratorContextManager",
+        ),
+        ("null_context", "yield", None, None),
+        (
+            "inner_context",
+            "# _.push(asynctb._tests.test_traceback.exit_cb)",
+            "_[1]",
+            None,
+        ),
+        (
+            "inner_context",
+            "# _.callback(asynctb._tests.test_traceback.other_cb, 10, 'hi', answer=42)",
+            "_[2]",
+            None,
+        ),
+        ("inner_context", "yield", None, None),
+        ("outer_context", "yield", None, None),
     ]
     assert_tb_matches(
         sync_example(sys._getframe(0)),

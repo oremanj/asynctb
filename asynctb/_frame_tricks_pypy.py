@@ -132,7 +132,8 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
                 blocks.append(ref)
         assert all(
             "Block" in name or "SysExcInfo" in name
-            for blk in blocks for name in [_pypy_typename(blk)]
+            for blk in blocks
+            for name in [_pypy_typename(blk)]
         )
         # Reverse so the oldest block is at the beginning
         blocks = blocks[::-1]
