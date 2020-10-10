@@ -1,11 +1,12 @@
 import attr
+import collections
 import dis
 import gc
 import sys
 import traceback
 import types
 import warnings
-from typing import Any, Dict, Generator, Iterator, List, Optional, Sequence, Tuple, cast
+from typing import Any, Deque, Dict, Generator, Iterator, List, Optional, Set, Sequence, Tuple, cast
 
 
 @attr.s(auto_attribs=True, slots=True, frozen=True, kw_only=True)
@@ -34,7 +35,7 @@ class ContextInfo:
 
 
 class InspectionWarning(RuntimeWarning):
-    pass
+    """Warning raised if something goes awry during frame inspection."""
 
 
 _can_use_trickery: Optional[bool] = None
@@ -120,7 +121,9 @@ def _contexts_active_by_referents(frame: types.FrameType) -> List[ContextInfo]:
     `~ContextInfo.varname` or `~ContextInfo.start_line` members of
     `ContextInfo`, and it's possible to fool it in some unlikely
     circumstances (e.g., if you have a local variable that points
-    directly to an ``__exit__`` or ``__aexit__`` method).
+    directly to an ``__exit__`` or ``__aexit__`` method, or if a context
+    manager's ``__exit__`` method is a static method or thinks its name
+    is something other than ``__exit__``).
     """
     ret: List[ContextInfo] = []
     for referent in gc.get_referents(frame):
@@ -185,18 +188,25 @@ class FrameDetails:
 
     @attr.s(auto_attribs=True)
     class FinallyBlock:
-        handler: int  # bytecode offset where the finally handler starts
-        level: int  # value stack depth at which handler begins execution
+        #: The bytecode offset to which control will be transferred if an
+        #: exception is raised
+        handler: int
 
-    # Currently active finally blocks in this frame (includes context managers too)
-    # in order from outermost to innermost
+        #: The value stack depth at which the handler begins execution
+        level: int
+
+    #: Currently active finally blocks in this frame (includes context managers too)
+    #: in order from outermost to innermost
     blocks: List[FinallyBlock] = attr.Factory(list)
 
-    # All values on this frame's value stack
+    #: All values on this frame's value stack
     stack: List[object] = attr.Factory(list)
 
 
 def inspect_frame(frame: types.FrameType) -> FrameDetails:
+    """Return a `FrameDetails` object describing the block stack and value stack
+    for the currently executing or suspended frame *frame*.
+    """
     # Overwrite this function with the version that's applicable to the
     # running interpreter
     global inspect_frame
@@ -214,11 +224,13 @@ def analyze_with_blocks(code: types.CodeType) -> Dict[int, ContextInfo]:
     partially filled-in `ContextInfo` object for each ``with`` or
     ``async with`` block.
 
-    Each key in the returned mapping is the bytecode offset of a
-    ``WITH_CLEANUP_START`` instruction that ends a ``with`` or ``async
-    with`` block. The corresponding value is a `ContextInfo` object
-    appropriate to that block, with all fields except ``manager``
-    filled in.
+    Each key in the returned mapping uniquely identifies one ``with``
+    or ``async with`` block in the function, by specifying the
+    bytecode offset of the ``WITH_CLEANUP_START`` (3.8 and earlier) or
+    ``WITH_EXCEPT_START`` (3.9 and later) instruction that begins its
+    associated exception handler.  The corresponding value is a
+    `ContextInfo` object appropriate to that block, with all fields
+    except ``manager`` filled in.
     """
     with_block_info: Dict[int, ContextInfo] = {}
     current_line = -1
@@ -246,43 +258,264 @@ class _ExitingContext:
     #: True for an async context manager, False for a sync context manager.
     is_async: bool
 
-    #: The bytecode offset of the WITH_CLEANUP_START instruction corresponding
-    #: to this context manager.
+    #: The bytecode offset of the WITH_CLEANUP_START or WITH_EXCEPT_START instruction
+    #: that begins the exception handler associated with this context manager.
     cleanup_offset: int
 
 
 def _currently_exiting_context(frame: types.FrameType) -> Optional[_ExitingContext]:
     """If *frame* is currently suspended waiting for one of its context managers'
-    __exit__ or __aexit__ methods to complete, then return a tuple
-    (corresponding WITH_CLEANUP_START bytecode offset, is_async).
+    __exit__ or __aexit__ methods to complete, then return an object indicating
+    which context manager is exiting and whether it's async or not.
     Otherwise return None.
     """
     code = frame.f_code.co_code
     op = dis.opmap
-    if frame.f_lasti < 0:
+    offs = frame.f_lasti
+    if offs < 0:
         return None
-    if (
-        code[frame.f_lasti] == op["WITH_CLEANUP_START"]
-        and code[frame.f_lasti + 2] == op["WITH_CLEANUP_FINISH"]
-    ):
-        return _ExitingContext(is_async=False, cleanup_offset=frame.f_lasti)
 
-    # PyPy suspends with lasti pointing at the YIELD_FROM; CPython suspends
-    # with lasti pointing just before it (at LOAD_CONST).
-    if (
-        bytes([op["YIELD_FROM"], op["WITH_CLEANUP_FINISH"]])
-        in code[frame.f_lasti : frame.f_lasti + 6 : 2]
+    # Our task here is twofold:
+    # - figure out whether `frame` is in the middle of a call to a context
+    #   manager __exit__ or __aexit__
+    # - if so, figure out *which* context manager, in terms that
+    #   can be matched up with the result of analyze_with_blocks()
+    #
+    # This is rather challenging, because the block stack gets popped
+    # before the __exit__ method is called, so we can't just consult
+    # the block stack like we do for the context managers that aren't
+    # currently exiting. But we can do it if we know something about
+    # how the Python bytecode compiler compiles 'with' and 'async
+    # with' blocks.
+    #
+    # There are basically three ways to exit a 'with' block:
+    # - falling off the bottom
+    # - jumping out (using return, break, or continue)
+    # - unwinding due to an exception
+    #
+    # On 3.7 and earlier, "jumping out" uses the exception-unwinding
+    # mechanism, and falling off the bottom falls through into the
+    # exception handling block, so there is only one bytecode location
+    # where __exit__ or __aexit__ is called. It looks like:
+    #
+    #     POP_BLOCK          \__ these may be absent if fallthrough is impossible
+    #     LOAD_CONST None    /
+    #     WITH_CLEANUP_START <-- block stack for exception unwinding points here
+    #     GET_AWAITABLE      \
+    #     LOAD_CONST None    |-- only if 'async with'
+    #     YIELD_FROM         /
+    #     WITH_CLEANUP_FINISH
+    #     END_FINALLY
+    #
+    # f_lasti will be at WITH_CLEANUP_START for a synchronous call,
+    # LOAD_CONST None for an async call on CPython, or YIELD_FROM for an
+    # async call on pypy.  Note that the LOAD_CONST may have some
+    # EXTENDED_ARGs before it, in weird cases where None is not one of
+    # the first 256 constants.
+    #
+    # On 3.8, falling off the bottom still falls through into the
+    # exception handling block, which looks like:
+    #
+    #     POP_BLOCK          \__ these may be absent if fallthrough is impossible
+    #     BEGIN_FINALLY      /
+    #     WITH_CLEANUP_START <-- block stack for exception unwinding points here
+    #     GET_AWAITABLE      \
+    #     LOAD_CONST None    |-- only if 'async with'
+    #     YIELD_FROM         /
+    #     WITH_CLEANUP_FINISH
+    #     END_FINALLY
+    #
+    # But, now each instance of jumping-out inlines its own cleanup. The cleanup
+    # sequence is the same as the terminal sequence except that it may have a
+    # ROT_TWO after POP_BLOCK (for non-constant 'return' jumps only, not 'break' or
+    # 'continue') and it ends with POP_FINALLY rather than END_FINALLY.
+    # Since there can be multiple WITH_CLEANUP_START opcodes that clean up
+    # the same 'with' block, we can't assume the WITH_CLEANUP_START near f_lasti is
+    # the one whose offset is named in the SETUP_WITH that analyze_with_blocks()
+    # found. Instead, we'll build a basic control-flow graph to see what offset
+    # was in the block that just got POP_BLOCK'ed.
+    #
+    # On 3.9, this was further split up so that "falling off the bottom" and
+    # "unwinding due to an exception" execute different code. Falling off the bottom:
+    #
+    #     POP_BLOCK
+    #     LOAD_CONST None
+    #     DUP_TOP
+    #     DUP_TOP
+    #     CALL_FUNCTION 3    <-- calls __exit__(None, None, None)
+    #     GET_AWAITABLE      \
+    #     LOAD_CONST None    |-- only if 'async with'
+    #     YIELD_FROM         /
+    #     POP_TOP            <-- return value of __exit__ ignored
+    #
+    # Jumping out: same as falling off the bottom, except with possible ROT_TWO
+    # after POP_BLOCK.
+    #
+    # Unwinding on exception:
+    #
+    #     WITH_EXCEPT_START  <-- block stack points here
+    #     GET_AWAITABLE      \
+    #     LOAD_CONST None    |-- only if 'async with'
+    #     YIELD_FROM         /
+    #     POP_JUMP_IF_TRUE x <-- jumps over the RERAISE
+    #     RERAISE
+    #     POP_TOP
+    #     POP_TOP
+    #     POP_TOP
+    #     POP_EXCEPT
+    #     POP_TOP
+    #
+    # Armed with that context, the below code will hopefully make a bit more sense!
+
+    # See if we're at a context manager __exit__ or __aexit__ call
+    is_async = False
+    if code[offs] == op["YIELD_FROM"] or (
+        offs + 2 < len(code) and code[offs + 2] == op["YIELD_FROM"]
     ):
-        offs = frame.f_lasti - (4 if code[frame.f_lasti] == op["YIELD_FROM"] else 2)
-        if code[offs + 2] != op["LOAD_CONST"]:  # pragma: no cover
-            return None
-        while code[offs] == op["EXTENDED_ARG"]:
+        # Async calls have lasti pointing at YIELD_FROM or LOAD_CONST
+        is_async = True
+        if code[offs] == op["YIELD_FROM"]:
+            # If lasti points to YIELD_FROM (pypy convention), move backward
+            # to point to LOAD_CONST (cpython convention)
             offs -= 2
-        if (
-            code[offs] == op["GET_AWAITABLE"]
-            and code[offs - 2] == op["WITH_CLEANUP_START"]
+        if code[offs] != op["LOAD_CONST"]:  # pragma: no cover
+            warnings.warn(
+                f"Surprise during analysis of {frame.f_code!r}: YIELD_FROM at {offs} "
+                f"not preceded by LOAD_CONST -- please file a bug",
+                InspectionWarning,
+            )
+            return None
+        # Backtrack one more to find GET_AWAITABLE
+        offs -= 2
+        while offs and code[offs] == op["EXTENDED_ARG"]:
+            # If LOAD_CONST had an EXTENDED_ARG then skip over those.
+            # This is very unlikely -- would require none of the first
+            # 256 constants used in a function to be None.
+            offs -= 2
+        if code[offs] != op["GET_AWAITABLE"]:
+            # Non-awaity use of 'yield from' --> must not be an __aexit__ call we're in
+            return None
+        # And finally go back one more to reach a CALL_FUNCTION,
+        # WITH_CLEANUP_START, or WITH_EXCEPT_START, which can be handled
+        # the same as in the synchronous case
+        offs -= 2
+
+    if sys.version_info < (3, 8):
+        # 3.7 and below: every exit call is done from a single WITH_CLEANUP_START
+        # location per 'with' block
+        if code[offs] == op["WITH_CLEANUP_START"]:
+            return _ExitingContext(is_async=is_async, cleanup_offset=offs)
+        return None
+    elif sys.version_info < (3, 9):
+        # 3.8: they all use WITH_CLEANUP_START, but there might be multiple instances;
+        # backtrack to the preceding POP_BLOCK
+        if offs < 4 or code[offs] != op["WITH_CLEANUP_START"]:
+            return None
+        if code[offs - 2] != op["BEGIN_FINALLY"]:
+            # Every jumping-out exit uses BEGIN_FINALLY before WITH_CLEANUP_START,
+            # but it's possible for the end-of-block exit to not have a preceding
+            # BEGIN_FINALLY. If we're in that situation, then we're in the
+            # exception handler, so we already know its offset.
+            return _ExitingContext(is_async=is_async, cleanup_offset=offs)
+        offs -= 4
+        if offs and code[offs] == op["ROT_TWO"]:
+            offs -= 2
+    else:
+        # 3.9 and above: either WITH_EXCEPT_START at the handler
+        # offset, or LOAD_CONST DUP_TOP DUP_TOP CALL_FUNCTION
+        # somewhere else (that particular sequence is not produced by
+        # anything else, as far as I can tell)
+        if code[offs] == op["WITH_EXCEPT_START"]:
+            return _ExitingContext(is_async=is_async, cleanup_offset=offs)
+        if offs < 8 or code[offs - 6 : offs + 2 : 2] != bytes(
+            [op["LOAD_CONST"], op["DUP_TOP"], op["DUP_TOP"], op["CALL_FUNCTION"]]
         ):
-            return _ExitingContext(is_async=True, cleanup_offset=offs - 2)
+            return None
+        # Backtrack from CALL_FUNCTION to the preceding POP_BLOCK
+        offs -= 8
+        while offs and code[offs] == op["EXTENDED_ARG"]:
+            offs -= 2
+        if offs and code[offs] == op["ROT_TWO"]:
+            offs -= 2
+
+    # If we get here, we're on 3.8 or later and offs is the offset of a
+    # POP_BLOCK opcode that popped the context manager block whose offset
+    # we want to return.
+    if code[offs] != op["POP_BLOCK"]:  # pragma: no cover
+        warnings.warn(
+            f"Surprise during analysis of {frame.f_code!r}: __exit__ call at {offs} "
+            f"not preceded by POP_BLOCK -- please file a bug",
+            InspectionWarning,
+        )
+        return None
+
+    pop_block_offs = offs
+
+    # The block stack on 3.8+ is pretty simple: there's only one
+    # type of block used outside exception handling, it's
+    # pushed by any of SETUP_FINALLY, SETUP_WITH, SETUP_ASYNC_WITH
+    # and popped by POP_BLOCK. This is the block type that will
+    # let us match up our POP_BLOCK with its corresponding
+    # SETUP_WITH or SETUP_ASYNC_WITH, so it's the only one we need
+    # to worry about.
+
+    # We represent the state of the block stack at each bytecode offset
+    # as a list of the bytecode offsets of exception handlers for
+    # each 'finally:'.
+    BlockStack = List[int]
+
+    # List of (bytecode offset, block stack that exists just before the
+    # instruction at that offset is executed)
+    todo: Deque[Tuple[int, BlockStack]] = collections.deque([(0, [])])
+
+    # Bytecode offsets we've already visited
+    seen: Set[int] = set()
+
+    while todo:  # pragma: no branch
+        offs, stack = todo.popleft()
+        if offs in seen:
+            continue
+        seen.add(offs)
+        arg = code[offs + 1]
+        while code[offs] == op["EXTENDED_ARG"]:
+            offs += 2
+            arg = (arg << 8) | code[offs + 1]
+        if code[offs] in dis.hasjabs:
+            todo.append((arg, stack[:]))
+        if code[offs] in dis.hasjrel:
+            todo.append((offs + 2 + arg, stack[:]))
+            # All three SETUP_* opcodes are in the hasjrel list,
+            # because they indicate a possible jump to the handler
+            # whose relative offset is named in their argument.
+            # That handler is entered with the finally block already
+            # popped, so it's correct that we record it in todo
+            # before updating the block stack.
+            if code[offs] in (
+                op["SETUP_FINALLY"], op["SETUP_WITH"], op["SETUP_ASYNC_WITH"]
+            ):
+                stack.append(offs + 2 + arg)
+        if code[offs] == op["POP_BLOCK"]:
+            if offs == pop_block_offs:
+                # We found the one we're looking for!
+                return _ExitingContext(is_async=is_async, cleanup_offset=stack[-1])
+            stack.pop()
+        if code[offs] not in (
+            op["JUMP_FORWARD"],
+            op["JUMP_ABSOLUTE"],
+            op["RETURN_VALUE"],
+            op["RAISE_VARARGS"],
+            op.get("RERAISE"),  # 3.9 only
+        ):
+            # The above are the unconditional control transfer opcodes.
+            # If we're not one of those, then we'll continue to the following
+            # line at least sometimes.
+            todo.append((offs + 2, stack))
+
+    warnings.warn(
+        f"Surprise during analysis of {frame.f_code!r}: POP_BLOCK at offset "
+        f"{pop_block_offs} doesn't appear reachable -- please file a bug",
+        InspectionWarning,
+    )
     return None
 
 

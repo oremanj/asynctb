@@ -84,6 +84,21 @@ def test_frame_not_started():
     coro.close()
 
 
+def test_non_async_yf():
+    def subgen():
+        yield 42
+
+    def gen():
+        with contextlib.ExitStack() as stack:
+            yield from subgen()
+
+    gi = gen()
+    assert gi.send(None) == 42
+    (info,) = _frames.contexts_active_in_frame(gi.gi_frame)
+    assert not info.is_async
+    assert info.manager is gi.gi_frame.f_locals["stack"]
+
+
 def test_aexit_extended_arg():
     # Create a function that uses 256 constants before its first None,
     # so that when it does LOAD_CONST None in __aexit__ it needs an
@@ -93,7 +108,8 @@ def test_aexit_extended_arg():
     lines = [
         "async def example():",
         "    '''Docstring.'''",
-        "    lst = " + repr(list(range(1000))),
+        "    s = 'A' * 1000",
+        "    lst = [{}]".format(", ".join(f"s[{idx}]" for idx in range(1000))),
         "    async with YieldsDuringAexit():",
         "        pass",
     ]
@@ -102,29 +118,119 @@ def test_aexit_extended_arg():
     coro = ns["example"]()
     assert 42 == coro.send(None)
     assert _frames.contexts_active_in_frame(coro.cr_frame) == [
-        _frames.ContextInfo(is_async=True, is_exiting=True, manager=None, start_line=4),
+        _frames.ContextInfo(is_async=True, is_exiting=True, manager=None, start_line=5),
     ]
+    coro.close()
+
+
+def test_jump_out_of_context():
+    async def afn(arg):
+        try:
+            for _ in range(2):  # pragma: no branch
+                async with YieldsDuringAexit() as mgr:
+                    if arg == 1:
+                        return arg * 10
+                    if arg == 2:
+                        return 20
+                    if arg == 3:
+                        break
+                    if arg == 4:
+                        raise KeyError(arg * 10)
+                if arg == 5:  # pragma: no branch
+                    return 50
+        except KeyError as ex:
+            return ex.args[0]
+        return 30
+
+    for arg in range(1, 6):
+        coro = afn(arg)
+        assert 42 == coro.send(None)
+        (info,) = _frames.contexts_active_in_frame(coro.cr_frame)
+        assert info.is_async and info.is_exiting and info.varname == "mgr"
+        assert info.start_line == afn.__code__.co_firstlineno + 3
+        with pytest.raises(StopIteration) as exc_info:
+            coro.send(None)
+        assert exc_info.value.value == arg * 10
+
+
+def test_context_all_exits_are_jumps():
+    async def afn(throw):
+        async with YieldsDuringAexit() as mgr:
+            if throw:
+                raise ValueError
+            return throw * 10
+
+    for throw in (False, True):
+        coro = afn(throw)
+        assert 42 == coro.send(None)
+        (info,) = _frames.contexts_active_in_frame(coro.cr_frame)
+        assert info.is_async and info.is_exiting and info.varname == "mgr"
+        assert info.start_line == afn.__code__.co_firstlineno + 1
+        coro.close()
+
+
+@pytest.mark.skipif(sys.version_info[:2] != (3, 8), reason="test is specific to 3.8")
+def test_unreachable_pop_block():
+    # We'll replace foo() here with the raising of an exception in a way that
+    # doesn't match anything the Python compiler can actually generate, which
+    # tickles a "can't happen" in _frames._currently_exiting_context.
+
+    async def fn():
+        async with YieldsDuringAexit():
+            ValueError()
+
+    op = dis.opmap
+    # fmt: off
+    search = [
+        op["LOAD_GLOBAL"], 1,
+        op["CALL_FUNCTION"], 0,
+        op["POP_TOP"], 0,
+    ]
+    replace = [
+        op["LOAD_GLOBAL"], 1,
+        op["RAISE_VARARGS"], 1,
+        op["NOP"], 0,
+    ]
+    # fmt: on
+    fn.__code__ = fn.__code__.replace(
+        co_code=fn.__code__.co_code.replace(bytes(search), bytes(replace))
+    )
+    coro = fn()
+    coro.send(None)
+    with pytest.warns(_frames.InspectionWarning, match="doesn't appear reachable"):
+        _frames.contexts_active_in_frame(coro.cr_frame)
     coro.close()
 
 
 @pytest.mark.skipif(sys.version_info < (3, 8), reason="uses CodeType.replace()")
 def test_unexpected_aexit_sequence():
+    # Interpose a no-op sequence in between LOAD_CONST None and YIELD_FROM,
+    # which are normally inseparable, in order to tickle a "can't happen"
+    # in _frames._currently_exiting_context.
+
     async def example():
         async with YieldsDuringAexit():
             pass
 
     op = dis.opmap
-    pattern = [op["WITH_CLEANUP_START"], 0, op["GET_AWAITABLE"], 0, op["LOAD_CONST"], 0]
+    if sys.version_info < (3, 9):
+        before = [op["WITH_CLEANUP_START"], 0]
+    else:
+        before = [op["LOAD_CONST"], 0, op["DUP_TOP"], 0, op["DUP_TOP"], 0]
+        before += [op["CALL_FUNCTION"], 3]
+    before += [op["GET_AWAITABLE"], 0, op["LOAD_CONST"], 0]
+    after = [op["YIELD_FROM"], 0]
     co = example.__code__
     example.__code__ = co.replace(
         co_code=co.co_code.replace(
-            bytes(pattern),
-            bytes(pattern[:2] + [op["LOAD_CONST"], 0, op["POP_TOP"], 0] + pattern[2:]),
+            bytes(before + after),
+            bytes(before + [op["LOAD_CONST"], 0, op["POP_TOP"], 0] + after),
         ),
     )
     coro = example()
     assert 42 == coro.send(None)
-    assert _frames.contexts_active_in_frame(coro.cr_frame) == []
+    with pytest.warns(_frames.InspectionWarning, match="not preceded by LOAD_CONST"):
+        _frames.contexts_active_in_frame(coro.cr_frame)
     coro.close()
 
 
@@ -149,17 +255,15 @@ def test_assignment_targets():
         with C((1, 2)) as (a, b), C((3,)) as [c]:
             with C(4) as ns.foo, C(5) as ns.sub.foo:
                 with C(6) as dct["one"], C(7) as dct["sub"]["two"]:
-                    with C(range(8, 12)) as (first, *rest, last):
-                        with C(12) as dct.__getitem__("sub")["three"]:
-                            with C(13) as locals()["ns"].bar, C(14):
-                                with C(15) as locals()[b"x".decode("ascii") + "y"]:
-                                    assert (a, b, c) == (1, 2, 3)
-                                    assert ns.foo == 4 and ns.sub.foo == 5
-                                    assert ns.bar == 13
-                                    assert dct["one"] == 6
-                                    assert dct["sub"] == {"two": 7, "three": 12}
-                                    assert (first, *rest, last) == (8, 9, 10, 11)
-                                    await async_yield(42)
+                    with C(8) as dct.__getitem__("sub")["three"]:
+                        with C(9) as locals()["ns"].bar, C(10):
+                            with C(11) as locals()[b"x".decode("ascii") + "y"]:
+                                assert (a, b, c) == (1, 2, 3)
+                                assert ns.foo == 4 and ns.sub.foo == 5
+                                assert ns.bar == 9
+                                assert dct["one"] == 6
+                                assert dct["sub"] == {"two": 7, "three": 8}
+                                await async_yield(42)
 
     coro = example()
     assert 42 == coro.send(None)
@@ -172,13 +276,35 @@ def test_assignment_targets():
         (5, "ns.sub.foo"),
         (6, "dct['one']"),
         (7, "dct['sub']['two']"),
-        (range(8, 12), "(first, *rest, last)"),
-        (12, "dct.__getitem__('sub')['three']"),
-        (13, "locals()['ns'].bar"),
-        (14, None),  # no target
-        (15, None),  # unsupported target
+        (8, "dct.__getitem__('sub')['three']"),
+        (9, "locals()['ns'].bar"),
+        (10, None),  # no target
+        (11, None),  # unsupported target
     ]
     coro.close()
+
+    if sys.version_info < (3, 9):
+        # spurious SyntaxError on 3.9: https://bugs.python.org/issue41979
+        ns = {}
+        exec(
+            "async def example():\n"
+            "    with C(range(4)) as (first, *rest, last):\n"
+            "        assert tuple(range(4)) == (first, *rest, last)\n"
+            "        await async_yield(42)",
+            {"C": C, **globals()},
+            ns,
+        )
+        coro = ns["example"]()
+        assert 42 == coro.send(None)
+        assert _frames.contexts_active_in_frame(coro.cr_frame) == [
+            _frames.ContextInfo(
+                is_async=False,
+                manager=C(range(4)),
+                varname="(first, *rest, last)",
+                start_line=2,
+            ),
+        ]
+        coro.close()
 
     if sys.version_info >= (3, 8):
         ns = {}

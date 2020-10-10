@@ -27,10 +27,24 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
             ("f_globals", ctypes.c_ulong),  # PyDictObject*
             ("f_locals", ctypes.c_ulong),  # PyObject*, some mapping
             ("f_valuestack", ctypes.c_ulong),  # PyObject**, points within self
-            ("f_stacktop", ctypes.c_ulong),  # PyObject**, points within self
             # and then we start seeing differences between different
             # Python versions
         ]
+        if sys.version_info < (3, 10):
+            # PyObject**, points within self
+            _fields_.append(("f_stacktop", ctypes.c_ulong))
+        else:
+            # 3.10 changes from having a top pointer to having a depth count;
+            # paper over the differences.
+            _fields_.append(("f_trace", ctypes.c_ulong))  # PyObject*
+            _fields_.append(("f_stackdepth", ctypes.c_int))
+
+            @property
+            def f_stacktop(self) -> int:
+                if self.f_stackdepth == -1:
+                    return 0
+                return self.f_valuestack + (self.f_stackdepth * wordsize)
+
         extra_header_bytes = object().__sizeof__() - 2 * wordsize
         if extra_header_bytes:  # pragma: no cover
             _fields_.insert(0, ("ob_debug", ctypes.c_byte * extra_header_bytes))
@@ -70,9 +84,9 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
     # the PyObject pointers. We just store their addresses (id), not taking
     # references or anything.
     if frame_raw.f_stacktop == 0:
-        # Frames that are currently executing have a NULL stacktop.
-        # Copy the whole stack; we'll trim it below based on which blocks
-        # are active.
+        # Frames that are currently executing have a NULL stacktop (a
+        # -1 stackdepth on 3.9+).  Copy the whole stack; we'll trim it
+        # below based on which blocks are active.
         stack_top_offset = end_offset
     else:
         stack_top_offset = frame_raw.f_stacktop - id(frame)

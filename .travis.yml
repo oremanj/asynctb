@@ -9,15 +9,17 @@ jobs:
       dist: bionic
     - language: generic
       env: PYPY_NIGHTLY_BRANCH=py3.6
+    - language: generic
+      env: PYPY_NIGHTLY_BRANCH=py3.7
     - python: 3.6-dev
     - python: 3.7-dev
     - python: 3.8-dev
     - python: 3.9-dev
-    - python: nightly
+    - python: 3.10-dev
 
 script:
   - ./ci.sh
 
 branches:
-  except:
-    - /^dependabot/.*/
+  only:
+    - master
