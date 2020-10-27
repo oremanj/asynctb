@@ -3,7 +3,7 @@ import threading
 from functools import partial, wraps
 
 import attr
-import pytest  # type: ignore
+import pytest
 
 import asynctb
 

@@ -6,7 +6,19 @@ import sys
 import traceback
 import types
 import warnings
-from typing import Any, Deque, Dict, Generator, Iterator, List, Optional, Set, Sequence, Tuple, cast
+from typing import (
+    Any,
+    Deque,
+    Dict,
+    Generator,
+    Iterator,
+    List,
+    Optional,
+    Set,
+    Sequence,
+    Tuple,
+    cast,
+)
 
 
 @attr.s(auto_attribs=True, slots=True, frozen=True, kw_only=True)
@@ -66,7 +78,7 @@ def contexts_active_in_frame(frame: types.FrameType) -> List[ContextInfo]:
             contexts_live = []
 
             def fn() -> Generator[None, None, None]:
-                with noop_cm as xyzzy:
+                with noop_cm as xyzzy:  # noqa: F841
                     contexts_live.extend(_contexts_active_by_trickery(sys._getframe(0)))
                     yield
 
@@ -491,7 +503,9 @@ def _currently_exiting_context(frame: types.FrameType) -> Optional[_ExitingConte
             # popped, so it's correct that we record it in todo
             # before updating the block stack.
             if code[offs] in (
-                op["SETUP_FINALLY"], op["SETUP_WITH"], op["SETUP_ASYNC_WITH"]
+                op["SETUP_FINALLY"],
+                op["SETUP_WITH"],
+                op["SETUP_ASYNC_WITH"],
             ):
                 stack.append(offs + 2 + arg)
         if code[offs] == op["POP_BLOCK"]:
@@ -520,8 +534,7 @@ def _currently_exiting_context(frame: types.FrameType) -> Optional[_ExitingConte
 
 
 def _describe_assignment_target(
-    insns: List[dis.Instruction],
-    start_idx: int,
+    insns: List[dis.Instruction], start_idx: int,
 ) -> Optional[str]:
     """Given that insns[start_idx] and beyond constitute a series of
     instructions that assign the top-of-stack value somewhere, this
@@ -549,7 +562,6 @@ def _describe_assignment_target(
         while True:
             insn = insns[idx]
             idx += 1
-            done = insn.opname.startswith(("STORE_", "UNPACK_"))
             if insn.opname == "EXTENDED_ARG":
                 continue
             if insn.opname in (
@@ -603,7 +615,7 @@ def _describe_assignment_target(
                 break
         if len(stack) != 1:
             # Walrus assignments can get here
-            raise ValueError(f"Assignment occurred at unsupported stack depth")
+            raise ValueError("Assignment occurred at unsupported stack depth")
         return stack[0]
 
     try:

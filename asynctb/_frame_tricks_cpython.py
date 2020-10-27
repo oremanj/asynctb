@@ -160,9 +160,7 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
             stack_validity_limit = 0
         del stack[stack_validity_limit:]
         details.stack = [
-            None if address == 0
-            # Needs ignore till https://github.com/python/typeshed/pull/4311 is released
-            else ctypes.cast(address, ctypes.py_object).value  # type: ignore
+            None if address == 0 else ctypes.cast(address, ctypes.py_object).value
             for address in stack
         ]
     else:

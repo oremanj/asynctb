@@ -6,16 +6,16 @@ import threading
 import types
 from contextlib import ExitStack, contextmanager
 from functools import partial
-from typing import List, Callable, Any
+from typing import List, Callable, Any, cast
 
 import attr
-import pytest  # type: ignore
+import pytest
 
 from .. import FrameInfo, Traceback, customize, register_get_target
 
 
 def remove_address_details(line):
-    return re.sub(r"\b0x[0-9a-f]+\b", "(address)", line)
+    return re.sub(r"\b0x[0-9A-Fa-f]+\b", "(address)", line)
 
 
 def assert_tb_matches(tb, expected, error=None):
@@ -86,7 +86,7 @@ def null_context():
 
 @contextmanager
 def outer_context():
-    with inner_context() as inner:
+    with inner_context() as inner:  # noqa: F841
         yield
 
 
@@ -455,7 +455,7 @@ def test_exiting():
 
     @contextmanager
     def capture_tb_on_exit(coro):
-        with inner_context() as inner:
+        with inner_context() as inner:  # noqa: F841
             try:
                 yield
             finally:
@@ -708,7 +708,7 @@ def test_cant_get_referents(monkeypatch):
     async def await_it(thing):
         await thing
 
-    for thing, problem, attr in (
+    for thing, problem, attrib in (
         (ags, ags, "an ag_frame"),
         (SomeAwaitable(), wrapper, "a cr_frame"),
     ):
@@ -718,7 +718,7 @@ def test_cant_get_referents(monkeypatch):
             Traceback.of(coro),
             [("await_it", "await thing", None, None)],
             error=RuntimeError(
-                f"{problem!r} doesn't refer to anything with {attr} attribute"
+                f"{problem!r} doesn't refer to anything with {attrib} attribute"
             ),
         )
         with pytest.raises(StopIteration):
@@ -851,7 +851,7 @@ def test_trio_nursery():
     @async_generator.asynccontextmanager
     @async_generator.async_generator
     async def uses_nursery():
-        async with trio.open_nursery() as inner:
+        async with trio.open_nursery() as inner:  # noqa: F841
             await async_generator.yield_()
 
     async def main():
@@ -863,7 +863,7 @@ def test_trio_nursery():
             result = Traceback.of(task.coro)
             trio.lowlevel.reschedule(task)
 
-        async with trio.open_nursery() as outer, uses_nursery():
+        async with trio.open_nursery() as outer, uses_nursery():  # noqa: F841
             trio.lowlevel.current_trio_token().run_sync_soon(report_back)
             await trio.lowlevel.wait_task_rescheduled(no_abort)
 
@@ -902,12 +902,14 @@ def test_greenback():
     results: List[Traceback] = []
 
     async def outer():
-        async with trio.open_nursery() as outer_nursery:
+        async with trio.open_nursery() as outer_nursery:  # noqa: F841
             middle()
             await inner()
 
     def middle():
-        with greenback.async_context(trio.open_nursery()) as middle_nursery:
+        with greenback.async_context(
+            trio.open_nursery()
+        ) as middle_nursery:  # noqa: F841
             greenback.await_(inner())
 
             # This winds up traversing an await_ before it has a coroutine to use.
@@ -1080,7 +1082,7 @@ def test_exitstack_formatting():
 
 ACM_IMPLS: List[Callable[..., Any]] = []
 try:
-    ACM_IMPLS.append(contextlib.asynccontextmanager)  # type: ignore
+    ACM_IMPLS.append(cast(Any, contextlib).asynccontextmanager)
 except AttributeError:
     pass
 try:

@@ -199,7 +199,7 @@ def glue_greenback() -> None:
 INSTALLED: bool = False
 
 
-def ensure_installed():
+def ensure_installed() -> None:
     global INSTALLED
     if INSTALLED:
         return

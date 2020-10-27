@@ -22,12 +22,11 @@ from typing_extensions import Protocol
 T = TypeVar("T")
 K = TypeVar("K")
 V = TypeVar("V")
-F_unwrap = TypeVar("F_unwrap", bound=Callable[[Any], Any])
 F_get_target = TypeVar("F_get_target", bound=Callable[[types.FrameType, bool], Any])
 F = TypeVar("F", bound=Callable[..., Any])
 
 
-RegisterFn = Callable[[type], Callable[[F_unwrap], F_unwrap]]
+RegisterFn = Callable[[type], Callable[[Callable[[Any], Any]], Callable[[Any], Any]]]
 
 
 def make_unwrapper(name: str) -> Tuple[Callable[[Any], Any], RegisterFn]:
@@ -42,9 +41,9 @@ def make_unwrapper(name: str) -> Tuple[Callable[[Any], Any], RegisterFn]:
                 return thing
             thing = unwrapped
 
-    for attr in ("__name__", "__qualname__"):
-        setattr(unwrap_repeatedly, attr, "unwrap_" + name)
-        setattr(unwrap_once.register, attr, "register_unwrap_" + name)
+    for attrib in ("__name__", "__qualname__"):
+        setattr(unwrap_repeatedly, attrib, "unwrap_" + name)
+        setattr(unwrap_once.register, attrib, "register_unwrap_" + name)
 
     return unwrap_repeatedly, cast(RegisterFn, unwrap_once.register)
 

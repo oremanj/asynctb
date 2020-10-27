@@ -19,7 +19,6 @@ jobs:
           - '3.7'
           - '3.8'
           - '3.9'
-          - '3.10.0-alpha.1'
         arch: ['x86', 'x64']
     steps:
       - name: Checkout
@@ -48,7 +47,6 @@ jobs:
           - '3.7'
           - '3.8'
           - '3.9'
-          - '3.10.0-alpha.1'
         check_docs: ['0']
         check_lint: ['0']
         extra_name: ['']
@@ -86,7 +84,6 @@ jobs:
           - '3.7'
           - '3.8'
           - '3.9'
-          - '3.10.0-alpha.1'
     steps:
       - name: Checkout
         uses: actions/checkout@v2

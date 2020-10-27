@@ -4,7 +4,7 @@ import sys
 import types
 
 import attr
-import pytest  # type: ignore
+import pytest
 
 from asynctb import _frames
 
@@ -60,9 +60,9 @@ def test_contexts_by_referents(monkeypatch):
     monkeypatch.setattr(_frames, "_can_use_trickery", False)
 
     async def afn():
-        with contextlib.ExitStack() as stack:
+        with contextlib.ExitStack() as stack:  # noqa: F841
             async with YieldsDuringAexit():
-                with contextlib.ExitStack() as stack2:
+                with contextlib.ExitStack() as stack2:  # noqa: F841
                     pass
 
     coro = afn()
@@ -76,7 +76,7 @@ def test_contexts_by_referents(monkeypatch):
 
 def test_frame_not_started():
     async def afn():
-        with contextlib.ExitStack() as stack:  # pragma: no cover
+        with contextlib.ExitStack():  # pragma: no cover
             pass
 
     coro = afn()
@@ -89,7 +89,7 @@ def test_non_async_yf():
         yield 42
 
     def gen():
-        with contextlib.ExitStack() as stack:
+        with contextlib.ExitStack() as stack:  # noqa: F841
             yield from subgen()
 
     gi = gen()
@@ -127,7 +127,7 @@ def test_jump_out_of_context():
     async def afn(arg):
         try:
             for _ in range(2):  # pragma: no branch
-                async with YieldsDuringAexit() as mgr:
+                async with YieldsDuringAexit() as mgr:  # noqa: F841
                     if arg == 1:
                         return arg * 10
                     if arg == 2:
@@ -155,7 +155,7 @@ def test_jump_out_of_context():
 
 def test_context_all_exits_are_jumps():
     async def afn(throw):
-        async with YieldsDuringAexit() as mgr:
+        async with YieldsDuringAexit() as mgr:  # noqa: F841
             if throw:
                 raise ValueError
             return throw * 10

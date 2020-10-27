@@ -771,7 +771,7 @@ if sys.version_info >= (3, 7):
     # GCMBase: the common base type of context manager objects returned by
     # functions decorated with either @contextlib.contextmanager or
     # @contextlib.asynccontextmanager
-    from contextlib import _GeneratorContextManagerBase as GCMBase  # type: ignore
+    GCMBase = cast(Any, contextlib)._GeneratorContextManagerBase
     from contextlib import AsyncExitStack
 
     # async_exit_stack.AsyncExitStack is an alias for
@@ -787,7 +787,7 @@ else:
         from contextlib import _GeneratorContextManager as GCMBase
 
         try:
-            from async_exit_stack import AsyncExitStack
+            from async_exit_stack import AsyncExitStack  # noqa: F811
         except ImportError:
             pass
 
@@ -855,9 +855,7 @@ def next_from_genlike(genlike: GeneratorLike) -> Any:
 
 
 def crawl_context(
-    frame: types.FrameType,
-    context: ContextInfo,
-    override_line: Optional[str] = None,
+    frame: types.FrameType, context: ContextInfo, override_line: Optional[str] = None,
 ) -> Iterator[FrameInfo]:
     """Yield a series of FrameInfos for the context manager described in *context*,
     which is a context manager active in *frame*.
