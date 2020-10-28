@@ -65,7 +65,7 @@ class FrameInfo:
 
     frame: types.FrameType
     lineno: int = attr.Factory(lambda self: self.frame.f_lineno, takes_self=True)
-    _override_line: Optional[str] = None
+    override_line: Optional[str] = None
     context_manager: object = None
     context_name: Optional[str] = None
 
@@ -89,8 +89,8 @@ class FrameInfo:
         `~contextlib.ExitStack`), where we can't determine the original
         source line, we return a synthesized line beginning with ``#``.
         """
-        if self._override_line is not None:
-            return self._override_line
+        if self.override_line is not None:
+            return self.override_line
         if self.lineno == 0:
             return ""
         return linecache.getline(
@@ -151,7 +151,7 @@ class FrameInfo:
             self.lineno,
             funcname,
             locals=save_locals,
-            line=self._override_line,
+            line=self.override_line,
         )
 
 
@@ -189,7 +189,7 @@ class Traceback:
     @classmethod
     def of(
         cls,
-        stackref: Union[GeneratorLike, GreenletType],
+        stackref: Union[GeneratorLike, GreenletType, threading.Thread],
         *,
         with_context_info: bool = True,
     ) -> "Traceback":
@@ -237,6 +237,15 @@ class Traceback:
             producer = iterate_running(
                 outer_frame, inner_frame, with_context_info, stackref
             )
+        elif isinstance(stackref, threading.Thread):
+            # If the thread is not alive both before and after we try to fetch
+            # its frame, then it's possible that its identity was reused, and
+            # we shouldn't trust the frame we get.
+            was_alive = stackref.is_alive()
+            inner_frame = sys._current_frames().get(stackref.ident)  # type: ignore
+            if inner_frame is None or not stackref.is_alive() or not was_alive:
+                return Traceback(frames=())
+            producer = iterate_running(None, inner_frame, with_context_info, stackref)
         else:
             producer = iterate_suspended(stackref, with_context_info)
         return cls._make(producer)
@@ -454,7 +463,6 @@ def iterate_suspended(
             this_frame=this_frame,
             next_frame=next_frame,
             with_context_info=with_context_info,
-            is_terminal=next_genlike is None,
             switch_count=switch_count,
         )
         if not keep_going:
@@ -467,7 +475,7 @@ def iterate_running(
     outer_frame: Optional[types.FrameType],
     inner_frame: Optional[types.FrameType],
     with_context_info: bool,
-    parent: Union[GeneratorLike, GreenletType, None] = None,
+    parent: Union[GeneratorLike, GreenletType, threading.Thread, None] = None,
     switch_count: int = 0,
 ) -> Iterator[FrameInfo]:
     """Yield information about a series of frames linked via f_back
@@ -480,12 +488,12 @@ def iterate_running(
     frames for the current thread's entire stack.
 
     If these frames represent the stack of a running generator or
-    coroutine or greenlet, pass *parent* as that generator or
-    coroutine or greenlet. This is used to switch back to
+    coroutine or greenlet or thread, pass *parent* as that generator
+    or coroutine or greenlet or thread. This is used to switch back to
     iterate_suspended() if a generator or coroutine stops running (in
     another thread) while we're looking. (We don't currently do
-    anything special with a greenlet *parent*, but maybe we'll want to
-    at some point.)
+    anything special with a greenlet or thread *parent*, but maybe
+    we'll want to at some point.)
 
     If *with_context_info* is True, yield additional frames
     representing context managers, to produce an enhanced traceback.
@@ -605,7 +613,7 @@ def iterate_running(
             # on its stack.
             if (
                 parent is not None
-                and not isinstance(parent, GreenletType)
+                and not isinstance(parent, (GreenletType, threading.Thread))
                 and switch_count < 50
             ):
                 if next_from_genlike(parent) is not RUNNING:
@@ -655,7 +663,6 @@ def iterate_running(
             this_frame=this_frame,
             next_frame=next_frame,
             with_context_info=with_context_info,
-            is_terminal=next_frame is None,
             switch_count=switch_count,
         )
         if not keep_going:
@@ -666,7 +673,6 @@ def handle_frame(
     this_frame: types.FrameType,
     next_frame: Optional[types.FrameType],
     with_context_info: bool,
-    is_terminal: bool,
     switch_count: int,
 ) -> Generator[FrameInfo, None, bool]:
     """Yield traceback information related to a single frame, *this_frame*.
@@ -698,7 +704,7 @@ def handle_frame(
 
     if handling.get_target is not None:
         try:
-            target = handling.get_target(this_frame, is_terminal)
+            target = handling.get_target(this_frame, next_frame)
             if isinstance(target, GreenletType):
                 # This frame is the runner for a greenlet.
                 # Grab gr_frame atomically in case it starts running in
@@ -719,6 +725,18 @@ def handle_frame(
                 # them if they're not.  If it's dead or not started,
                 # then there's nothing to yield.  So in all of those
                 # cases we yield nothing.
+            elif isinstance(target, threading.Thread):
+                # This frame is waiting for a thread to complete.
+                # Go look at what the thread is doing.
+                thread_frame = sys._current_frames().get(target.ident)  # type: ignore
+                if thread_frame is not None:
+                    yield from iterate_running(
+                        outer_frame=None,
+                        inner_frame=thread_frame,
+                        with_context_info=with_context_info,
+                        parent=target,
+                        switch_count=switch_count + 1,
+                    )
             elif target is not None:
                 # This frame is the runner for a genlike
                 yield from iterate_suspended(

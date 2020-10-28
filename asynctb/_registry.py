@@ -17,16 +17,15 @@ from typing import (
     cast,
     overload,
 )
-from typing_extensions import Protocol
+
+GetTargetFn = Callable[[types.FrameType, Optional[types.FrameType]], Any]
+RegisterFn = Callable[[type], Callable[[Callable[[Any], Any]], Callable[[Any], Any]]]
 
 T = TypeVar("T")
 K = TypeVar("K")
 V = TypeVar("V")
-F_get_target = TypeVar("F_get_target", bound=Callable[[types.FrameType, bool], Any])
+F_get_target = TypeVar("F_get_target", bound=GetTargetFn)
 F = TypeVar("F", bound=Callable[..., Any])
-
-
-RegisterFn = Callable[[type], Callable[[Callable[[Any], Any]], Callable[[Any], Any]]]
 
 
 def make_unwrapper(name: str) -> Tuple[Callable[[Any], Any], RegisterFn]:
@@ -127,7 +126,7 @@ class IdentityDict(MutableMapping[K, V]):
 class CodeHandling:
     skip_frame: bool = False
     skip_callees: bool = False
-    get_target: Optional[Callable[[types.FrameType, bool], Any]] = None
+    get_target: Optional[GetTargetFn] = None
 
 
 HANDLING_FOR_CODE = IdentityDict[types.CodeType, CodeHandling]()
@@ -174,7 +173,7 @@ def customize(
     *,
     skip_frame: Optional[bool] = None,
     skip_callees: Optional[bool] = None,
-    get_target: Optional[Callable[[types.FrameType, bool], Any]] = None,
+    get_target: Optional[GetTargetFn] = None,
 ) -> Callable[[F], F]:
     ...
 
@@ -185,7 +184,7 @@ def customize(
     *nested_names: str,
     skip_frame: Optional[bool] = None,
     skip_callees: Optional[bool] = None,
-    get_target: Optional[Callable[[types.FrameType, bool], Any]] = None,
+    get_target: Optional[GetTargetFn] = None,
 ) -> None:
     ...
 
@@ -195,7 +194,7 @@ def customize(
     *nested_names: str,
     skip_frame: Optional[bool] = None,
     skip_callees: Optional[bool] = None,
-    get_target: Optional[Callable[[types.FrameType, bool], Any]] = None,
+    get_target: Optional[GetTargetFn] = None,
 ) -> object:
     if thing is None:
 

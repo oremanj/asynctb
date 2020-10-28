@@ -1,9 +1,10 @@
 import gc
 import sys
+import threading
 import traceback
 import types
 import warnings
-from typing import Any, AsyncGenerator
+from typing import Any, AsyncGenerator, Optional
 from . import _registry
 
 
@@ -46,6 +47,12 @@ def glue_native() -> None:
             f"{aw!r} doesn't refer to anything with a cr_frame attribute"
         )
 
+    # Don't show thread bootstrap gunk at the base of thread stacks
+    _registry.customize(threading.Thread.run, skip_frame=True)
+    for name in ("_bootstrap", "_bootstrap_inner"):
+        if hasattr(threading.Thread, name):  # pragma: no branch
+            _registry.customize(getattr(threading.Thread, name), skip_frame=True)
+
 
 def glue_async_generator() -> None:
     try:
@@ -84,12 +91,14 @@ def glue_outcome() -> None:
     except ImportError:
         return
 
-    # outcome.send() is quite noisy in tracebacks when using
-    # greenback, and it's hard to think of any other case where you'd
-    # care about it either -- if you see 'something.send(coro)' in one frame
-    # and you're inside coro in the next, it's pretty obvious what's going on.
+    # Don't give simple outcome functions their own traceback frame,
+    # as they tend to add clutter without adding meaning. If you see
+    # 'something.send(coro)' in one frame and you're inside coro in
+    # the next, it's pretty obvious what's going on.
     _registry.customize(outcome.Value.send, skip_frame=True)
     _registry.customize(outcome.Error.send, skip_frame=True)
+    _registry.customize(outcome.capture, skip_frame=True)
+    _registry.customize(outcome.acapture, skip_frame=True)
 
 
 def glue_trio() -> None:
@@ -151,8 +160,10 @@ def glue_greenback() -> None:
     _registry.customize(greenback.await_, skip_frame=True)
 
     @_registry.register_get_target(greenback._impl._greenback_shim)
-    def unwrap_greenback_shim(frame: types.FrameType, is_terminal: bool) -> Any:
-        if not is_terminal:
+    def unwrap_greenback_shim(
+        frame: types.FrameType, next_frame: Optional[types.FrameType]
+    ) -> Any:
+        if next_frame is not None:
             # Greenback shim that's not suspended at its yield point requires
             # no special handling -- just keep tracebacking.
             return None
@@ -176,8 +187,10 @@ def glue_greenback() -> None:
             )
 
     @_registry.register_get_target(greenback.await_)
-    def unwrap_greenback_await(frame: types.FrameType, is_terminal: bool) -> Any:
-        if not is_terminal:
+    def unwrap_greenback_await(
+        frame: types.FrameType, next_frame: Optional[types.FrameType]
+    ) -> Any:
+        if next_frame is not None and next_frame.f_code.co_name != "switch":
             # await_ that's not suspended at greenlet.switch() requires
             # no special handling
             return None

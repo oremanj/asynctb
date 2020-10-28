@@ -18,6 +18,10 @@ def remove_address_details(line):
     return re.sub(r"\b0x[0-9A-Fa-f]+\b", "(address)", line)
 
 
+def clean_tb_line(line):
+    return remove_address_details(line).partition("  #")[0]
+
+
 def assert_tb_matches(tb, expected, error=None):
     # smoke test:
     str(tb)
@@ -40,8 +44,7 @@ def assert_tb_matches(tb, expected, error=None):
             (expect_fn, expect_line, expect_ctx_name, expect_ctx_typename),
         ) in zip(tb, expected):
             assert entry.funcname == expect_fn
-            clean_linetext = remove_address_details(entry.linetext).partition("  #")[0]
-            assert clean_linetext == expect_line
+            assert clean_tb_line(entry.linetext) == expect_line
             assert entry.context_name == expect_ctx_name
             if entry.context_manager is None:
                 assert expect_ctx_typename is None
@@ -68,7 +71,7 @@ def print_assert_matches(get_tb):  # pragma: no cover
             linetext = get_tb + ","
         else:
             funcname = entry.funcname
-            linetext = remove_address_details(entry.linetext)
+            linetext = clean_tb_line(entry.linetext)
         typename = type(entry.context_manager).__name__
         if typename == "NoneType":
             typename = None
@@ -78,6 +81,12 @@ def print_assert_matches(get_tb):  # pragma: no cover
     if tb.error:
         print(f"        error={remove_address_details(repr(tb.error))},")
     print("    )")
+
+
+def no_abort(_):  # pragma: no cover
+    import trio
+
+    return trio.lowlevel.Abort.FAILED
 
 
 @contextmanager
@@ -114,10 +123,13 @@ def async_yield(value):
     return (yield value)
 
 
-if sys.version_info >= (3, 7):
-    null_context_repr = "null_context(...)"
-else:
-    null_context_repr = "asynctb._tests.test_traceback.null_context()"
+null_mgr = null_context()
+with null_mgr:
+    if hasattr(null_mgr, "func"):
+        null_context_repr = "asynctb._tests.test_traceback.null_context()"
+    else:
+        null_context_repr = "null_context(...)"
+del null_mgr
 
 
 # There's some logic in the traceback extraction of running code that
@@ -565,42 +577,150 @@ def test_running_in_thread():
         thread_example(*args)
 
     # Currently running in other thread
-    arrived_evt = threading.Event()
-    depart_evt = threading.Event()
-    thread = threading.Thread(target=thread_caller, args=(arrived_evt, depart_evt))
+    for cooked in (False, True):
+        arrived_evt = threading.Event()
+        depart_evt = threading.Event()
+        thread = threading.Thread(target=thread_caller, args=(arrived_evt, depart_evt))
+        thread.start()
+        try:
+            arrived_evt.wait()
+            if cooked:
+                tb = Traceback.of(thread)
+            else:
+                top_frame = sys._current_frames()[thread.ident]
+                while (
+                    top_frame.f_back is not None
+                    and top_frame.f_code.co_name != "thread_caller"
+                ):
+                    top_frame = top_frame.f_back
+                tb = Traceback.since(top_frame)
+
+            # Exactly where we are inside Event.wait() is indeterminate, so
+            # strip frames until we find Event.wait() and then remove it
+
+            while (
+                not tb.frames[-1].filename.endswith("threading.py")
+                or tb.frames[-1].funcname != "wait"
+            ):  # pragma: no cover
+                tb = attr.evolve(tb, frames=tb.frames[:-1])
+            while tb.frames[-1].filename.endswith("threading.py"):  # pragma: no cover
+                tb = attr.evolve(tb, frames=tb.frames[:-1])
+
+            assert_tb_matches(
+                tb,
+                [
+                    ("thread_caller", "thread_example(*args)", None, None),
+                    *frames_from_outer_context("thread_example"),
+                    ("thread_example", "depart_evt.wait()", None, None),
+                ],
+            )
+        finally:
+            depart_evt.set()
+
+
+def test_traceback_of_not_alive_thread(isolated_registry):
+    thread = threading.Thread(target=lambda: None)
+    assert_tb_matches(Traceback.of(thread), [])
     thread.start()
-    try:
-        arrived_evt.wait()
-        top_frame = sys._current_frames()[thread.ident]
-        while (
-            top_frame.f_back is not None and top_frame.f_code.co_name != "thread_caller"
-        ):
-            top_frame = top_frame.f_back
-        tb = Traceback.since(top_frame)
+    thread.join()
+    assert_tb_matches(Traceback.of(thread), [])
 
-        # Exactly where we are inside Event.wait() is indeterminate, so
-        # strip frames until we find Event.wait() and then remove it
+    @customize(get_target=lambda *_: thread)
+    async def example():
+        await async_yield(42)
 
-        while (
-            not tb.frames[-1].filename.endswith("threading.py")
-            or tb.frames[-1].funcname != "wait"
-        ):  # pragma: no cover
-            tb = attr.evolve(tb, frames=tb.frames[:-1])
-        while tb.frames[-1].filename.endswith("threading.py"):  # pragma: no cover
-            tb = attr.evolve(tb, frames=tb.frames[:-1])
-
-        assert_tb_matches(
-            tb,
-            [
-                ("thread_caller", "thread_example(*args)", None, None),
-                *frames_from_outer_context("thread_example"),
-                ("thread_example", "depart_evt.wait()", None, None),
-            ],
-        )
-    finally:
-        depart_evt.set()
+    coro = example()
+    coro.send(None)
+    assert_tb_matches(
+        Traceback.of(coro),
+        [
+            ('example', 'await async_yield(42)', None, None),
+            ('async_yield', 'return (yield value)', None, None),
+        ],
+    )
 
 
+def test_trace_into_thread(local_registry):
+    trio = pytest.importorskip("trio")
+    import outcome
+
+    # Extremely simplified version of trio.to_thread.run_sync
+    async def run_sync_in_thread(sync_fn):
+        task = trio.lowlevel.current_task()
+        trio_token = trio.lowlevel.current_trio_token()
+
+        def run_it():
+            result = outcome.capture(sync_fn)
+            trio_token.run_sync_soon(trio.lowlevel.reschedule, task, result)
+
+        thread = threading.Thread(target=run_it)
+        thread.start()
+        return await trio.lowlevel.wait_task_rescheduled(no_abort)
+
+    @register_get_target(run_sync_in_thread)
+    def get_target(this_frame, next_frame):
+        return this_frame.f_locals["thread"]
+
+    customize(run_sync_in_thread, "run_it", skip_frame=True)
+
+    tb = None
+
+    async def main():
+        arrived_evt = trio.Event()
+        depart_evt = threading.Event()
+        trio_token = trio.lowlevel.current_trio_token()
+        task = trio.lowlevel.current_task()
+
+        def sync_fn():
+            with inner_context() as inner:  # noqa: F841
+                trio_token.run_sync_soon(arrived_evt.set)
+                depart_evt.wait()
+
+        def sync_wrapper():
+            sync_fn()
+
+        async def capture_tb():
+            nonlocal tb
+            try:
+                await arrived_evt.wait()
+                tb = Traceback.of(task.coro)
+            finally:
+                depart_evt.set()
+
+        async with trio.open_nursery() as nursery:
+            nursery.start_soon(capture_tb)
+            await run_sync_in_thread(sync_wrapper)
+
+    trio.run(main)
+
+    # It's indeterminate where in sync_fn() the traceback was taken -- it could
+    # be inside run_sync_soon() or inside threading.Event.wait() -- so trim
+    # traceback frames until we get something reliable.
+    while tb.frames[-1].filename != __file__:
+        tb = attr.evolve(tb, frames=tb.frames[:-1])
+    tb = attr.evolve(
+        tb,
+        frames=tb.frames[:-1] + (
+            attr.evolve(tb.frames[-1], override_line="<indeterminate>"),
+        ),
+    )
+    assert_tb_matches(
+        tb,
+        [
+            ("main", "async with trio.open_nursery() as nursery:", "nursery", "Nursery"),
+            ("main", "await run_sync_in_thread(sync_wrapper)", None, None),
+            ("run_sync_in_thread", "return await trio.lowlevel.wait_task_rescheduled(no_abort)", None, None),
+            ("sync_wrapper", "sync_fn()", None, None),
+            *frames_from_inner_context("sync_fn"),
+            ("sync_fn", "<indeterminate>", None, None),
+        ],
+    )
+
+
+@pytest.mark.skipif(
+    sys.implementation.name == "pypy",
+    reason="profile function doesn't get called on Travis",
+)
 def test_threaded_race():
     # This tests the case where we're getting the traceback of a coroutine
     # running in a foreign thread, but it becomes suspended before we can
@@ -841,10 +961,6 @@ def test_with_trickery_disabled(monkeypatch):
     )
 
 
-def no_abort(_):
-    return trio.lowlevel.Abort.FAILED  # pragma: no cover
-
-
 def test_trio_nursery():
     trio = pytest.importorskip("trio")
     async_generator = pytest.importorskip("async_generator")
@@ -1025,6 +1141,9 @@ def test_greenback():
 
 def test_exitstack_formatting():
     class A:
+        def __repr__(self):
+            return "A()"
+
         def method(self, *args):
             pass
 
@@ -1044,13 +1163,13 @@ def test_exitstack_formatting():
                 ),
                 (
                     "test_exitstack_formatting",
-                    "# stack.callback(<asynctb._tests.test_traceback.test_exitstack_formatting.<locals>.A object at (address)>.method)",
+                    "# stack.callback(A().method)",
                     "stack[0]",
                     None,
                 ),
                 (
                     "test_exitstack_formatting",
-                    "# stack.push(<asynctb._tests.test_traceback.test_exitstack_formatting.<locals>.A object at (address)>.method)",
+                    "# stack.push(A().method)",
                     "stack[1]",
                     "A",
                 ),

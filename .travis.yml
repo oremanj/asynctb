@@ -9,8 +9,9 @@ jobs:
       dist: bionic
     - language: generic
       env: PYPY_NIGHTLY_BRANCH=py3.6
-    - language: generic
-      env: PYPY_NIGHTLY_BRANCH=py3.7
+    # Disabled until Trio works:
+    #- language: generic
+    #  env: PYPY_NIGHTLY_BRANCH=py3.7
     - python: 3.6-dev
     - python: 3.7-dev
     - python: 3.8-dev

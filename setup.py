@@ -17,7 +17,7 @@ setup(
     include_package_data=True,
     keywords=["async", "debugging", "trio", "asyncio"],
     python_requires=">=3.6",
-    install_requires=["attrs >= 19.2", "typing_extensions"],
+    install_requires=["attrs >= 19.2"],
     classifiers=[
         "License :: OSI Approved :: MIT License",
         "License :: OSI Approved :: Apache Software License",

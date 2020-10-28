@@ -80,17 +80,7 @@ def current_frame_uses_registered_get_target():
     return tb.frames[1].funcname == "fake_target"
 
 
-@pytest.fixture
-def local_registry():
-    from asynctb._registry import HANDLING_FOR_CODE
-
-    prev_contents = list(HANDLING_FOR_CODE.items())
-    HANDLING_FOR_CODE.clear()
-    yield
-    HANDLING_FOR_CODE.update(prev_contents)
-
-
-def test_registration_through_functools_wraps_or_partial(local_registry):
+def test_registration_through_functools_wraps_or_partial(isolated_registry):
     def example(magic_arg):
         return asynctb.Traceback.since(sys._getframe(0))
 
@@ -107,7 +97,7 @@ def test_registration_through_functools_wraps_or_partial(local_registry):
     assert tb.frames[-1].frame.f_locals["arg"] == 10
 
 
-def test_registration_through_code_object(local_registry):
+def test_registration_through_code_object(isolated_registry):
     def code_example(magic_arg):
         return asynctb.Traceback.since(sys._getframe(0))
 
@@ -121,7 +111,7 @@ def test_registration_through_unsupported():
         asynctb.customize(42, skip_frame=True)
 
 
-def test_registration_through_method(local_registry):
+def test_registration_through_method(isolated_registry):
     class C:
         @asynctb.customize(get_target=simple_get_target)
         def instance(self, magic_arg):
@@ -146,7 +136,7 @@ def test_registration_through_method(local_registry):
     assert c.static(1) == C.static(2) == ("static", None)
 
 
-def test_registration_through_nested(local_registry):
+def test_registration_through_nested(isolated_registry):
     def outer_fn(magic_arg):
         def middle_fn():
             def inner_fn():
@@ -173,9 +163,7 @@ def test_registration_through_nested(local_registry):
     assert inner_fn()
 
 
-def test_install_concurrently(local_registry, monkeypatch):
-    asynctb._glue.ensure_installed()
-
+def test_install_concurrently(isolated_registry, monkeypatch):
     def one_fn():
         return asynctb.Traceback.since(sys._getframe(0)).frames
 
@@ -225,9 +213,7 @@ def test_install_concurrently(local_registry, monkeypatch):
     assert not two_fn()
 
 
-def test_glue_error(local_registry, monkeypatch):
-    asynctb._glue.ensure_installed()
-
+def test_glue_error(isolated_registry, monkeypatch):
     def glue_whoops():
         raise ValueError("guess not")
 
