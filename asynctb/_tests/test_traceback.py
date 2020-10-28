@@ -582,11 +582,11 @@ def test_running_in_thread():
         # strip frames until we find Event.wait() and then remove it
 
         while (
-            not tb.frames[-1].filename.endswith("/threading.py")
+            not tb.frames[-1].filename.endswith("threading.py")
             or tb.frames[-1].funcname != "wait"
         ):  # pragma: no cover
             tb = attr.evolve(tb, frames=tb.frames[:-1])
-        while tb.frames[-1].filename.endswith("/threading.py"):  # pragma: no cover
+        while tb.frames[-1].filename.endswith("threading.py"):  # pragma: no cover
             tb = attr.evolve(tb, frames=tb.frames[:-1])
 
         assert_tb_matches(
@@ -973,12 +973,7 @@ def test_greenback():
     assert_tb_matches(
         results[0],
         [
-            (
-                "greenback_shim",
-                "return await _greenback_shim(orig_coro)",
-                None,
-                None,
-            ),
+            ("greenback_shim", "return await _greenback_shim(orig_coro)", None, None,),
             ("main", "return await outer()", None, None),
             (
                 "outer",
@@ -1007,12 +1002,7 @@ def test_greenback():
     assert_tb_matches(
         results[1],
         [
-            (
-                "greenback_shim",
-                "return await _greenback_shim(orig_coro)",
-                None,
-                None,
-            ),
+            ("greenback_shim", "return await _greenback_shim(orig_coro)", None, None,),
             ("main", "return await outer()", None, None),
             (
                 "outer",
