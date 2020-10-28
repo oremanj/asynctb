@@ -634,8 +634,8 @@ def test_traceback_of_not_alive_thread(isolated_registry):
     assert_tb_matches(
         Traceback.of(coro),
         [
-            ('example', 'await async_yield(42)', None, None),
-            ('async_yield', 'return (yield value)', None, None),
+            ("example", "await async_yield(42)", None, None),
+            ("async_yield", "return (yield value)", None, None),
         ],
     )
 
@@ -700,16 +700,25 @@ def test_trace_into_thread(local_registry):
         tb = attr.evolve(tb, frames=tb.frames[:-1])
     tb = attr.evolve(
         tb,
-        frames=tb.frames[:-1] + (
-            attr.evolve(tb.frames[-1], override_line="<indeterminate>"),
-        ),
+        frames=tb.frames[:-1]
+        + (attr.evolve(tb.frames[-1], override_line="<indeterminate>"),),
     )
     assert_tb_matches(
         tb,
         [
-            ("main", "async with trio.open_nursery() as nursery:", "nursery", "Nursery"),
+            (
+                "main",
+                "async with trio.open_nursery() as nursery:",
+                "nursery",
+                "Nursery",
+            ),
             ("main", "await run_sync_in_thread(sync_wrapper)", None, None),
-            ("run_sync_in_thread", "return await trio.lowlevel.wait_task_rescheduled(no_abort)", None, None),
+            (
+                "run_sync_in_thread",
+                "return await trio.lowlevel.wait_task_rescheduled(no_abort)",
+                None,
+                None,
+            ),
             ("sync_wrapper", "sync_fn()", None, None),
             *frames_from_inner_context("sync_fn"),
             ("sync_fn", "<indeterminate>", None, None),

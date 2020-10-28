@@ -48,9 +48,9 @@ version of ``inspect.stack()`` that takes a coroutine object, you can.
 ``asynctb`` requires Python 3.6 or later. It is tested with CPython
 (every minor version through 3.10-dev) and PyPy, on Linux, Windows,
 and macOS. It will probably work on other operating systems.
-(Basic features will work on other interpreters, but the context
+Basic features will work on other interpreters, but the context
 manager decoding will be less intelligent, and won't work at all
-without a usable ``gc.get_referents()``.)
+without a usable ``gc.get_referents()``.
 
 This is still in development. It has full test coverage, but
 will likely undergo some incompatible API changes before an initial
