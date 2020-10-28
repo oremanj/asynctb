@@ -11,8 +11,7 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
     assert sys.implementation.name == "cpython"
 
     details = FrameDetails()
-    c_uintptr = ctypes.c_ulonglong
-    wordsize = ctypes.sizeof(c_uintptr)
+    wordsize = ctypes.sizeof(ctypes.c_size_t)
 
     # This is the layout of the start of a frame object. It has a couple
     # fields we can't access from Python, especially f_valuestack and
@@ -20,24 +19,24 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
     class FrameObjectStart(ctypes.Structure):
         _fields_: List[Tuple[str, Type["ctypes._CData"]]] = [
             ("ob_refcnt", ctypes.c_size_t),  # reference count
-            ("ob_type", c_uintptr),  # PyTypeObject*
+            ("ob_type", ctypes.c_size_t),  # PyTypeObject*
             ("ob_size", ctypes.c_size_t),  # number of pointers after f_localsplus
-            ("f_back", c_uintptr),  # PyFrameObject*
-            ("f_code", c_uintptr),  # PyCodeObject*
-            ("f_builtins", c_uintptr),  # PyDictObject*
-            ("f_globals", c_uintptr),  # PyDictObject*
-            ("f_locals", c_uintptr),  # PyObject*, some mapping
-            ("f_valuestack", c_uintptr),  # PyObject**, points within self
+            ("f_back", ctypes.c_size_t),  # PyFrameObject*
+            ("f_code", ctypes.c_size_t),  # PyCodeObject*
+            ("f_builtins", ctypes.c_size_t),  # PyDictObject*
+            ("f_globals", ctypes.c_size_t),  # PyDictObject*
+            ("f_locals", ctypes.c_size_t),  # PyObject*, some mapping
+            ("f_valuestack", ctypes.c_size_t),  # PyObject**, points within self
             # and then we start seeing differences between different
             # Python versions
         ]
         if sys.version_info < (3, 10):
             # PyObject**, points within self
-            _fields_.append(("f_stacktop", c_uintptr))
+            _fields_.append(("f_stacktop", ctypes.c_size_t))
         else:
             # 3.10 changes from having a top pointer to having a depth count;
             # paper over the differences.
-            _fields_.append(("f_trace", c_uintptr))  # PyObject*
+            _fields_.append(("f_trace", ctypes.c_size_t))  # PyObject*
             _fields_.append(("f_stackdepth", ctypes.c_int))
 
             @property
@@ -93,7 +92,7 @@ def inspect_frame(frame: FrameType) -> FrameDetails:
         stack_top_offset = frame_raw.f_stacktop - id(frame)
         assert stack_start_offset <= stack_top_offset <= end_offset
     stack = [
-        c_uintptr.from_address(id(frame) + offset).value
+        ctypes.c_size_t.from_address(id(frame) + offset).value
         for offset in range(stack_start_offset, stack_top_offset, wordsize)
     ]
     # Now stack[i] corresponds to f_valuestack[i] in C.
