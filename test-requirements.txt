@@ -1,9 +1,10 @@
 trio
 async_exit_stack
 async_generator
+greenback >= 0.3.0
 
 # Testing
-pytest
+pytest >= 6.0
 pytest-cov
 pytest-trio
 

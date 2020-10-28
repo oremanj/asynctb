@@ -40,7 +40,8 @@ def assert_tb_matches(tb, expected, error=None):
             (expect_fn, expect_line, expect_ctx_name, expect_ctx_typename),
         ) in zip(tb, expected):
             assert entry.funcname == expect_fn
-            assert remove_address_details(entry.linetext) == expect_line
+            clean_linetext = remove_address_details(entry.linetext).partition("  #")[0]
+            assert clean_linetext == expect_line
             assert entry.context_name == expect_ctx_name
             if entry.context_manager is None:
                 assert expect_ctx_typename is None
@@ -907,9 +908,8 @@ def test_greenback():
             await inner()
 
     def middle():
-        with greenback.async_context(
-            trio.open_nursery()
-        ) as middle_nursery:  # noqa: F841
+        nursery_mgr = trio.open_nursery()
+        with greenback.async_context(nursery_mgr) as middle_nursery:  # noqa: F841
             greenback.await_(inner())
 
             # This winds up traversing an await_ before it has a coroutine to use.
@@ -921,7 +921,7 @@ def test_greenback():
                         [
                             (
                                 "greenback_shim",
-                                "return await _greenback_shim(orig_coro)  # type: ignore",
+                                "return await _greenback_shim(orig_coro)",
                                 None,
                                 None,
                             ),
@@ -935,13 +935,13 @@ def test_greenback():
                             ("outer", "middle()", None, None),
                             (
                                 "middle",
-                                "with greenback.async_context(trio.open_nursery()) as middle_nursery:",
+                                "with greenback.async_context(nursery_mgr) as middle_nursery:",
                                 "middle_nursery",
                                 "Nursery",
                             ),
                             (
                                 "middle",
-                                "greenback.await_(ExtractWhenAwaited())  # pragma: no cover",
+                                "greenback.await_(ExtractWhenAwaited())",
                                 None,
                                 None,
                             ),
@@ -975,7 +975,7 @@ def test_greenback():
         [
             (
                 "greenback_shim",
-                "return await _greenback_shim(orig_coro)  # type: ignore",
+                "return await _greenback_shim(orig_coro)",
                 None,
                 None,
             ),
@@ -989,7 +989,7 @@ def test_greenback():
             ("outer", "middle()", None, None),
             (
                 "middle",
-                "with greenback.async_context(trio.open_nursery()) as middle_nursery:",
+                "with greenback.async_context(nursery_mgr) as middle_nursery:",
                 "middle_nursery",
                 "Nursery",
             ),
@@ -1009,7 +1009,7 @@ def test_greenback():
         [
             (
                 "greenback_shim",
-                "return await _greenback_shim(orig_coro)  # type: ignore",
+                "return await _greenback_shim(orig_coro)",
                 None,
                 None,
             ),
