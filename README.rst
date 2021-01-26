@@ -61,7 +61,7 @@ License: Your choice of MIT or Apache License 2.0
 Debugging deadlocks in Trio programs
 ------------------------------------
 
-``asynctb`` can help debugging deadlocks in Trio programs:
+``asynctb`` can help debugging deadlocks in Trio programs::
 
     import signal
     import os
@@ -69,7 +69,7 @@ Debugging deadlocks in Trio programs
     import trio
     import asynctb
 
-    async def traceback_on_signal():
+    async def print_tracebacks_on_sighup():
         print('pid:', os.getpid())
         with trio.open_signal_receiver(signal.SIGHUP) as signal_aiter:
             async for signum in signal_aiter:
@@ -87,10 +87,10 @@ Debugging deadlocks in Trio programs
     async def main():
         # ...
         async with trio.open_nursery() as nursery:
-            nursery.start_soon(traceback_on_signal)
+            nursery.start_soon(print_tracebacks_on_sighup)
 
     trio.run(main)
 
-Use SIGHUP signal to make the program print tracebacks for all running Trio tasks:
+You can now send SIGHUP signal to make your program print tracebacks for all running Trio tasks::
 
     kill -s HUP <pid>
