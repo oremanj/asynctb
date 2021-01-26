@@ -57,3 +57,40 @@ will likely undergo some incompatible API changes before an initial
 release. Documentation is also currently light. Watch this space!
 
 License: Your choice of MIT or Apache License 2.0
+
+Debugging deadlocks in Trio programs
+------------------------------------
+
+``asynctb`` can help debugging deadlocks in Trio programs:
+
+    import signal
+    import os
+
+    import trio
+    import asynctb
+
+    async def traceback_on_signal():
+        print('pid:', os.getpid())
+        with trio.open_signal_receiver(signal.SIGHUP) as signal_aiter:
+            async for signum in signal_aiter:
+                assert signum == signal.SIGHUP
+                for nursery, task in get_tasks(trio.lowlevel.current_root_task()):
+                    print(f'# {task!r} in {nursery!r}')
+                    print(asynctb.Traceback.of(task.coro))
+
+    def get_tasks(task, nursery = None):
+        yield nursery, task
+        for nursery in task.child_nurseries:
+            for task in nursery.child_tasks:
+                yield from get_tasks(task, nursery)
+
+    async def main():
+        # ...
+        async with trio.open_nursery() as nursery:
+            nursery.start_soon(traceback_on_signal)
+
+    trio.run(main)
+
+Use SIGHUP signal to make the program print tracebacks for all running Trio tasks:
+
+    kill -s HUP <pid>
