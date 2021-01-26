@@ -88,6 +88,7 @@ Debugging deadlocks in Trio programs
         # ...
         async with trio.open_nursery() as nursery:
             nursery.start_soon(print_tracebacks_on_sighup)
+            # ...
 
     trio.run(main)
 
